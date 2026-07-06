@@ -210,29 +210,59 @@ def strand_coverage_for_chrom(
 
 def count_unique_reads_in_intervals(
     path: str,
-    intervals: List[Tuple[str, int, int, str]],
+    intervals: List[Tuple[str, int, int]],
     cfg: Config,
     strandedness: str = "unstranded",
-    strand_filter: bool = False,
+    annotation=None,
+    stranded_masking: bool = False,
 ) -> List[int]:
-    """Count uniquely-mapped reads whose midpoint falls in each interval.
+    """Count uniquely-mapped reads assigned to each candidate region.
 
-    ``intervals`` are (chrom, start, end, strand). One targeted fetch per
-    interval (candidate regions are few, so this avoids a second full pass).
-    Using the midpoint means a read is counted for at most one region.
+    ``intervals`` are (chrom, start, end). One targeted fetch per interval
+    (candidate regions are few, so this avoids a second full pass). A read is
+    assigned by its midpoint, so it counts toward at most one region.
 
-    When ``strand_filter`` is True (stranded masking), only reads whose
-    transcription strand matches the region's strand are counted — so a region
-    discovered as antisense over an annotated exon does not also count the host
-    gene's sense reads (which are counted as annotated instead). A region strand
-    of '.' counts both strands.
+    A read is EXCLUDED from a region if it is already counted as annotated on its
+    own transcription strand (same rule used for the annotated read tally), so
+    the categories partition the reads without double counting: e.g. an antisense
+    region over an exon does not also count the host gene's sense reads (those are
+    annotated). Both strands of a genuine bidirectional / gDNA region are counted,
+    because those positions are unannotated.
     """
     _require_pysam()
     bam = open_bam(path)
+
+    # Lazily build per-chrom sorted mask starts/ends for a point-in-mask test.
+    cache: dict = {}
+
+    def _mask_arrays(chrom):
+        if chrom not in cache:
+            if stranded_masking and annotation is not None:
+                pv = annotation.mask_intervals_plus.get(chrom, [])
+                mv = annotation.mask_intervals_minus.get(chrom, [])
+            elif annotation is not None:
+                pos = annotation.mask_intervals.get(chrom, [])
+                pv = mv = pos
+            else:
+                pv = mv = []
+            cache[chrom] = {
+                "+": (np.array([s for s, _ in pv]), np.array([e for _, e in pv])),
+                "-": (np.array([s for s, _ in mv]), np.array([e for _, e in mv])),
+            }
+        return cache[chrom]
+
+    def _annotated_on_strand(chrom, pos, strand):
+        if annotation is None:
+            return False
+        starts, ends = _mask_arrays(chrom)[strand if strand in ("+", "-") else "+"]
+        if starts.size == 0:
+            return False
+        i = int(np.searchsorted(starts, pos, side="right")) - 1
+        return i >= 0 and pos < ends[i]
+
     counts: List[int] = []
-    for chrom, start, end, region_strand in intervals:
+    for chrom, start, end in intervals:
         n = 0
-        want = region_strand if region_strand in ("+", "-") else None
         try:
             for read in bam.fetch(chrom, start, end):
                 if read_category(read, cfg) != "unique":
@@ -242,9 +272,9 @@ def count_unique_reads_in_intervals(
                 mid = (rs + re) // 2
                 if not (start <= mid < end):
                     continue
-                if strand_filter and want is not None:
-                    if transcription_strand(read, strandedness) != want:
-                        continue
+                strand = transcription_strand(read, strandedness)
+                if _annotated_on_strand(chrom, mid, strand):
+                    continue  # already counted as annotated on its own strand
                 n += 1
         except ValueError:
             pass

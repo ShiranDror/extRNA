@@ -171,12 +171,10 @@ def run(cfg: Config) -> Dict:
     read_assignment = None
     if cfg.emit_multiqc:
         from .bam_io import count_unique_reads_in_intervals
-        intervals = [
-            (c.chrom, c.start, c.end, c.metrics.dominant_strand) for c in candidates
-        ]
+        intervals = [(c.chrom, c.start, c.end) for c in candidates]
         region_reads = count_unique_reads_in_intervals(
             cfg.bam, intervals, cfg, strandedness=strandedness,
-            strand_filter=stranded_masking,
+            annotation=annotation, stranded_masking=stranded_masking,
         )
         read_assignment = writers.compute_read_assignment(
             candidates, region_reads,
