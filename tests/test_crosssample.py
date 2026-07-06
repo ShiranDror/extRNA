@@ -164,6 +164,30 @@ def test_reference_plus_consensus_gtf(tmp_path):
     assert "\texon\t1000\t2010\t" in text
 
 
+def test_chrom_column_forced_to_string(tmp_path):
+    # Regression: many numeric chromosomes followed by "MT" must not make polars
+    # infer an integer chrom column and then fail to parse "MT".
+    rows = [(str(i), 1000 + i, 2000 + i, LIKELY_NOVEL, "+") for i in range(1, 23)]
+    rows.append(("MT", 500, 1500, LIKELY_NOVEL, "+"))
+    path = _write_tsv(tmp_path / "A.candidate_regions.tsv", rows)
+    cfg = ConsensusConfig(tsvs=[path], out_prefix=str(tmp_path / "co"), min_samples=1)
+    df = load_candidates(cfg)
+    assert str(df.schema["chrom"]) in ("String", "Utf8")
+    # "MT" is present and grouped correctly.
+    regions = build_consensus(df, cfg)
+    assert any(r.chrom == "MT" for r in regions)
+
+
+def test_numeric_only_chrom_still_string(tmp_path):
+    # Even when every chromosome value is numeric, chrom must load as string so
+    # a later sample with "X"/"MT" merges consistently.
+    path = _write_tsv(tmp_path / "A.candidate_regions.tsv",
+                      [("1", 1000, 2000, LIKELY_NOVEL, "+")])
+    cfg = ConsensusConfig(tsvs=[path], out_prefix=str(tmp_path / "co"), min_samples=1)
+    df = load_candidates(cfg)
+    assert str(df.schema["chrom"]) in ("String", "Utf8")
+
+
 def test_end_to_end_files_written(tmp_path):
     a = _write_tsv(tmp_path / "A.candidate_regions.tsv",
                    [("chr1", 1000, 2000, LIKELY_NOVEL, "+")])

@@ -67,6 +67,17 @@ GTF_SOURCE = "gdna_rescue_consensus"
 # Columns we rely on from the per-sample TSV.
 _REQUIRED_COLS = ("chrom", "start", "end", "class")
 
+# Columns that must be read as text, never numerically inferred. `chrom` is the
+# critical one: chromosome names like "MT", "X", "GL000..." are non-numeric, but
+# if the first rows are all numeric ("1", "2", ...) polars infers an integer
+# column and then fails on the first non-numeric name. Forcing these to string
+# makes loading robust to any chromosome naming and any gene-id scheme.
+_STRING_COLS = (
+    "region_id", "chrom", "class", "dominant_strand", "nearest_feature_id",
+    "context_label", "kept_as_unknown_transcript", "unknown_transcript_name",
+    "reason_for_classification",
+)
+
 
 @dataclass
 class ConsensusConfig:
@@ -118,7 +129,12 @@ def load_candidates(cfg: ConsensusConfig) -> pl.DataFrame:
 
     frames = []
     for path, name in zip(cfg.tsvs, names):
-        df = pl.read_csv(path, separator="\t", infer_schema_length=10000)
+        # Peek at the header so we only override columns that are present.
+        columns = pl.read_csv(path, separator="\t", n_rows=0).columns
+        overrides = {c: pl.String for c in columns if c in _STRING_COLS}
+        df = pl.read_csv(
+            path, separator="\t", schema_overrides=overrides, infer_schema_length=10000
+        )
         missing = [c for c in _REQUIRED_COLS if c not in df.columns]
         if missing:
             raise ValueError(f"{path!r} is missing required columns: {missing}")
