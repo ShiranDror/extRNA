@@ -127,16 +127,21 @@ def build_candidates_for_chrom(
     multi_cov: np.ndarray,
     annotation: Annotation,
     cfg: Config,
+    annotated_mask: "np.ndarray | None" = None,
+    exon_mask: "np.ndarray | None" = None,
 ) -> List[Candidate]:
     """Discover intervals on a chromosome and attach metrics + context.
 
     ``region_id`` values are provisional (per-chrom); the pipeline renumbers
     them globally and assigns unknown_transcript names after gathering all
-    chromosomes so ordering is deterministic.
+    chromosomes so ordering is deterministic. Masks may be passed in to avoid
+    rebuilding them when the caller already has them.
     """
     length = plus_cov.size
-    annotated_mask = annotation.mask_array(chrom, length)
-    exon_mask = annotation.exon_mask_array(chrom, length)
+    if annotated_mask is None:
+        annotated_mask = annotation.mask_array(chrom, length)
+    if exon_mask is None:
+        exon_mask = annotation.exon_mask_array(chrom, length)
 
     intervals = discover_intervals(plus_cov, minus_cov, annotated_mask, cfg)
 

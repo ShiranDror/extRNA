@@ -205,48 +205,71 @@ def compute_gdna_qc(
     }
 
 
-def write_multiqc_tsv(
-    cfg: Config, candidates: List[Candidate], gdna_qc: Dict, path: str
-) -> None:
-    """Write a MultiQC custom-content TSV that feeds the General Statistics table.
+# Ordered read-assignment categories: (internal key, MultiQC column label).
+READ_CATEGORY_COLUMNS = [
+    ("annotated", "annotated"),
+    (LIKELY_NOVEL, "novel_transcript"),
+    (POSSIBLE_BIDIRECTIONAL, "bidirectional_RNA"),
+    (LIKELY_GDNA, "gDNA"),
+    (LIKELY_MULTIMAPPER, "multimapper_artifact"),
+    ("other_unannotated", "other_unannotated"),
+]
 
-    MultiQC auto-detects files matching ``*_mqc.tsv``. The commented YAML header
-    configures the columns; the single data row is keyed by the sample name, so
-    MultiQC merges rows across all samples in a run.
+
+def compute_read_assignment(
+    candidates: List[Candidate],
+    region_reads: List[int],
+    total_unique_reads: int,
+    total_annotated_reads: int,
+) -> Dict[str, int]:
+    """Partition uniquely-mapped reads into region classes (counts, not %).
+
+    ``region_reads`` is the per-candidate uniquely-mapped read count (same order
+    as ``candidates``). Annotated reads and candidate-region reads are disjoint
+    (candidate regions contain no annotated positions), so the remainder is
+    unannotated signal that did not form a candidate region.
+    """
+    cats: Dict[str, int] = {
+        "annotated": int(total_annotated_reads),
+        LIKELY_NOVEL: 0,
+        POSSIBLE_BIDIRECTIONAL: 0,
+        LIKELY_GDNA: 0,
+        LIKELY_MULTIMAPPER: 0,
+    }
+    assigned = 0
+    for c, n in zip(candidates, region_reads):
+        cats[c.label] = cats.get(c.label, 0) + int(n)
+        assigned += int(n)
+    cats["other_unannotated"] = max(
+        0, int(total_unique_reads) - int(total_annotated_reads) - assigned
+    )
+    return cats
+
+
+def write_multiqc_tsv(cfg: Config, read_assignment: Dict[str, int], path: str) -> None:
+    """Write a MultiQC custom-content bargraph TSV of read assignment.
+
+    MultiQC auto-detects ``*_mqc.tsv``. As a stacked bargraph of raw read counts,
+    MultiQC's built-in counts/percentage toggle does the normalisation. The
+    single data row is keyed by sample name, so rows merge across samples.
     """
     sample = cfg.sample_name or os.path.basename(cfg.out_prefix) or "sample"
-    n_rescued = sum(1 for c in candidates if c.kept)
 
     header = [
-        "# id: 'extrna_gdna'",
-        "# section_name: 'extRNA gDNA contamination'",
-        "# description: 'gDNA-like signal in unannotated regions and rescued novel transcripts (extRNA).'",
-        "# plot_type: 'generalstats'",
+        "# id: 'extrna_read_assignment'",
+        "# section_name: 'extRNA read assignment'",
+        "# description: 'Uniquely-mapped reads by region class: already annotated, "
+        "rescued novel (per class), gDNA-like, and multimapper artifacts. "
+        "Use the Percentages toggle to normalise.'",
+        "# plot_type: 'bargraph'",
         "# pconfig:",
-        "#     - extrna_pct_gDNA:",
-        "#         title: '% gDNA'",
-        "#         description: 'Percent of uniquely-mapped coverage in gDNA-flagged unannotated regions'",
-        "#         min: 0",
-        "#         max: 100",
-        "#         suffix: '%'",
-        "#         scale: 'OrRd'",
-        "#         format: '{:,.2f}'",
-        "#     - extrna_gDNA_regions:",
-        "#         title: 'gDNA regions'",
-        "#         description: 'Number of unannotated regions classified as likely gDNA'",
-        "#         format: '{:,.0f}'",
-        "#     - extrna_novel_transcripts:",
-        "#         title: 'novel transcripts'",
-        "#         description: 'Rescued candidate novel transcripts'",
-        "#         format: '{:,.0f}'",
+        "#     id: 'extrna_read_assignment_plot'",
+        "#     title: 'extRNA: read assignment'",
+        "#     ylab: 'Uniquely-mapped reads'",
+        "#     cpswitch_counts_label: 'Read counts'",
     ]
-    cols = ["Sample", "extrna_pct_gDNA", "extrna_gDNA_regions", "extrna_novel_transcripts"]
-    row = [
-        sample,
-        f"{gdna_qc['pct_gDNA_of_mapped_coverage']}",
-        f"{gdna_qc['n_gDNA_regions']}",
-        f"{n_rescued}",
-    ]
+    cols = ["Sample"] + [label for _, label in READ_CATEGORY_COLUMNS]
+    row = [sample] + [str(read_assignment.get(key, 0)) for key, _ in READ_CATEGORY_COLUMNS]
     with open(path, "w") as fh:
         fh.write("\n".join(header) + "\n")
         fh.write("\t".join(cols) + "\n")
@@ -259,6 +282,7 @@ def write_summary_json(
     strandedness_metrics: Dict,
     path: str,
     gdna_qc: Dict | None = None,
+    read_assignment: Dict | None = None,
 ) -> Dict:
     """Write the run summary and return it."""
     n_gdna = sum(1 for c in candidates if c.label == LIKELY_GDNA)
@@ -280,6 +304,7 @@ def write_summary_json(
         "n_rescued_unknown_transcripts": len(rescued),
         "total_bases_in_rescued_unknown_transcripts": total_rescued_bases,
         "gdna_contamination_qc": gdna_qc or {},
+        "read_assignment_counts": read_assignment or {},
     }
     with open(path, "w") as fh:
         json.dump(summary, fh, indent=2, default=str)

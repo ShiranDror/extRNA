@@ -30,15 +30,19 @@ def _process_one_chrom(
     """
     from .bam_io import strand_coverage_for_chrom  # local import: pysam only here
 
-    plus, minus, multi = strand_coverage_for_chrom(
-        bam_path, chrom, length, cfg, strandedness
+    annotated_mask = annotation.mask_array(chrom, length)
+    exon_mask = annotation.exon_mask_array(chrom, length)
+
+    plus, minus, multi, read_stats = strand_coverage_for_chrom(
+        bam_path, chrom, length, cfg, strandedness, annotated_mask=annotated_mask
     )
     total_unique = int(plus.sum()) + int(minus.sum())
     total_multi = int(multi.sum())
     candidates = build_candidates_for_chrom(
-        chrom, plus, minus, multi, annotation, cfg
+        chrom, plus, minus, multi, annotation, cfg,
+        annotated_mask=annotated_mask, exon_mask=exon_mask,
     )
-    return candidates, total_unique, total_multi
+    return candidates, total_unique, total_multi, read_stats
 
 
 def _assign_names(candidates: List[Candidate]) -> None:
@@ -94,6 +98,16 @@ def run(cfg: Config) -> Dict:
     candidates: List[Candidate] = []
     genome_unique_cov = 0
     genome_multi_cov = 0
+    read_totals = {"n_unique_reads": 0, "n_unique_reads_annotated": 0,
+                   "n_multi_reads": 0}
+
+    def _accumulate(tu, tm, rs):
+        nonlocal genome_unique_cov, genome_multi_cov
+        genome_unique_cov += tu
+        genome_multi_cov += tm
+        for k in read_totals:
+            read_totals[k] += rs[k]
+
     if cfg.threads > 1 and len(chroms) > 1:
         with ProcessPoolExecutor(max_workers=cfg.threads) as ex:
             futures = {
@@ -110,25 +124,36 @@ def run(cfg: Config) -> Dict:
                 logger.debug("Finished %s: %d candidates", chrom, len(results[chrom][0]))
         # Reassemble in header order for deterministic numbering.
         for chrom in chroms:
-            cands, tu, tm = results.get(chrom, ([], 0, 0))
+            cands, tu, tm, rs = results.get(
+                chrom, ([], 0, 0, dict(read_totals)))
             candidates.extend(cands)
-            genome_unique_cov += tu
-            genome_multi_cov += tm
+            _accumulate(tu, tm, rs)
     else:
         for chrom in chroms:
-            chrom_cands, tu, tm = _process_one_chrom(
+            chrom_cands, tu, tm, rs = _process_one_chrom(
                 cfg.bam, chrom, chrom_sizes[chrom], cfg, strandedness, annotation
             )
             logger.debug("Finished %s: %d candidates", chrom, len(chrom_cands))
             candidates.extend(chrom_cands)
-            genome_unique_cov += tu
-            genome_multi_cov += tm
+            _accumulate(tu, tm, rs)
 
     # Sort within-chrom by start (header order already applied across chroms).
     candidates.sort(key=lambda c: (chroms.index(c.chrom), c.start, c.end))
     _assign_names(candidates)
 
     gdna_qc = writers.compute_gdna_qc(candidates, genome_unique_cov, genome_multi_cov)
+
+    # Read-count assignment for MultiQC (targeted fetches over candidate regions).
+    read_assignment = None
+    if cfg.emit_multiqc:
+        from .bam_io import count_unique_reads_in_intervals
+        intervals = [(c.chrom, c.start, c.end) for c in candidates]
+        region_reads = count_unique_reads_in_intervals(cfg.bam, intervals, cfg)
+        read_assignment = writers.compute_read_assignment(
+            candidates, region_reads,
+            read_totals["n_unique_reads"],
+            read_totals["n_unique_reads_annotated"],
+        )
 
     # --- write outputs ----------------------------------------------------
     tsv = f"{cfg.out_prefix}.candidate_regions.tsv"
@@ -144,11 +169,12 @@ def run(cfg: Config) -> Dict:
     if cfg.emit_bedgraph:
         writers.write_bedgraph(candidates, cfg.out_prefix)
     summary = writers.write_summary_json(
-        cfg, candidates, strand_metrics, summary_json, gdna_qc=gdna_qc
+        cfg, candidates, strand_metrics, summary_json,
+        gdna_qc=gdna_qc, read_assignment=read_assignment,
     )
-    if cfg.emit_multiqc:
+    if cfg.emit_multiqc and read_assignment is not None:
         writers.write_multiqc_tsv(
-            cfg, candidates, gdna_qc, f"{cfg.out_prefix}.gdna_mqc.tsv"
+            cfg, read_assignment, f"{cfg.out_prefix}.gdna_mqc.tsv"
         )
 
     logger.info(

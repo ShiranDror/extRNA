@@ -167,7 +167,7 @@ samtools index sample.bam
 | `sample_analysis.summary.json` | Run parameters, strandedness, class counts |
 | `sample_analysis.candidate_regions.bed` | BED6 of all candidates (optional) |
 | `sample_analysis.candidates.{plus,minus}.bedgraph` | Per-strand depth (with `--emit-bedgraph`) |
-| `sample_analysis.gdna_mqc.tsv` | **MultiQC** custom-content TSV — puts **% gDNA** into the General Statistics table |
+| `sample_analysis.gdna_mqc.tsv` | **MultiQC** bargraph TSV — read counts per class (annotated / novel / gDNA / …), normalisable to % in MultiQC |
 
 **Coordinate conventions:** TSV and GTF are 1-based inclusive; BED/bedGraph are
 0-based half-open.
@@ -175,25 +175,34 @@ samtools index sample.bam
 ### MultiQC integration
 
 Each per-sample run writes `sample_analysis.gdna_mqc.tsv`, a MultiQC
-custom-content file (`generalstats` plot type). Point MultiQC at your output
-directory and the **% gDNA** column appears in the General Statistics table, one
-row per sample:
+custom-content **bargraph** of **read assignment**. Point MultiQC at your output
+directory and a stacked bar per sample appears in the report:
 
 ```bash
 multiqc .    # discovers *_mqc.tsv from all samples automatically
 ```
 
-The headline metric **`% gDNA`** = uniquely-mapped coverage in gDNA-flagged
-unannotated regions, as a percentage of **all** uniquely-mapped coverage in the
-sample — a library-level contamination proxy. The row also reports the number of
-gDNA regions and the number of rescued novel transcripts. The full breakdown
-(including the candidate-relative percentages and genome-wide coverage totals)
-is in `summary.json` under `gdna_contamination_qc`.
+The bar reports **raw uniquely-mapped read counts** per region class, so
+MultiQC's built-in **counts / percentages toggle** does the normalisation:
 
-> The percentage covers gDNA-like signal found in *unannotated* candidate
-> regions (annotated exons are not tested for gDNA), so it estimates
-> contamination surfacing as novel-looking signal, not total genomic DNA in the
-> library.
+| Category | Meaning |
+|---|---|
+| `annotated` | reads over existing annotated features |
+| `novel_transcript` | reads in rescued `likely_novel_transcript` regions |
+| `bidirectional_RNA` | reads in rescued `possible_bidirectional_RNA` regions |
+| `gDNA` | reads in `likely_gDNA` regions |
+| `multimapper_artifact` | reads in `likely_multimapper_artifact` regions |
+| `other_unannotated` | unannotated reads that formed no candidate region |
+
+The categories partition the uniquely-mapped reads (they sum to the sample
+total). Counts are assigned by read midpoint: annotated reads and
+candidate-region reads are disjoint because candidate regions contain no
+annotated positions. The same counts, plus the coverage-based gDNA percentages,
+are in `summary.json` under `read_assignment_counts` and `gdna_contamination_qc`.
+
+> gDNA is only tested among *unannotated* candidate regions (annotated exons are
+> not), so the `gDNA` bar reflects contamination surfacing as novel-looking
+> signal, not total genomic DNA in the library.
 
 Each rescued transcript carries attributes:
 `gene_id "unknown_transcript_N_gene"`, `transcript_id "unknown_transcript_N"`,
@@ -396,7 +405,8 @@ FastQC / fastp (trim)
   -> edgeR / DESeq2  (differential expression)
 
   (aggregate QC across samples with `multiqc .` — the per-sample
-   *.gdna_mqc.tsv files add a "% gDNA" column to General Statistics)
+   *.gdna_mqc.tsv files add a stacked read-assignment bar: annotated vs
+   novel vs gDNA, with a counts/percentage toggle)
 ```
 
 Points that matter for correct results:

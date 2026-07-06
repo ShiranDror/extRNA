@@ -120,13 +120,17 @@ def strand_coverage_for_chrom(
     length: int,
     cfg: Config,
     strandedness: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (plus_unique, minus_unique, multi) int32 coverage arrays.
+    annotated_mask: "np.ndarray | None" = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Return (plus_unique, minus_unique, multi, read_stats).
 
     ``plus_unique`` / ``minus_unique`` are strand-specific coverage from
     uniquely-mapped reads (these DEFINE candidate regions). ``multi`` is
-    strand-agnostic coverage from multimapped/secondary reads, used only to
-    estimate the uniquely-mapped fraction of a region.
+    strand-agnostic coverage from multimapped/secondary reads.
+
+    ``read_stats`` counts reads (not coverage) for QC: total unique reads, unique
+    reads whose midpoint falls in an annotated feature, and multimapped reads.
+    Counting by read midpoint keeps this O(1) per read within the existing pass.
 
     Uses difference-array accumulation over aligned blocks (fast path) or a
     per-base loop when base-quality filtering is requested.
@@ -139,6 +143,10 @@ def strand_coverage_for_chrom(
     plus = np.zeros(size, dtype=np.int32)
     minus = np.zeros(size, dtype=np.int32)
     multi = np.zeros(size, dtype=np.int32)
+
+    n_unique = 0
+    n_unique_annotated = 0
+    n_multi = 0
 
     def _add_blocks(arr, read):
         if use_baseq:
@@ -164,20 +172,67 @@ def strand_coverage_for_chrom(
         if category is None:
             continue
         if category == "multi":
+            n_multi += 1
             _add_blocks(multi, read)
             continue
+        # unique read
+        n_unique += 1
+        if annotated_mask is not None:
+            rs = read.reference_start
+            re = read.reference_end or (rs + 1)
+            mid = (rs + re) // 2
+            if 0 <= mid < length and annotated_mask[mid]:
+                n_unique_annotated += 1
         strand = transcription_strand(read, strandedness)
         _add_blocks(plus if strand == "+" else minus, read)
 
     bam.close()
 
+    read_stats = {
+        "n_unique_reads": n_unique,
+        "n_unique_reads_annotated": n_unique_annotated,
+        "n_multi_reads": n_multi,
+    }
+
     if use_baseq:
-        return plus, minus, multi
+        return plus, minus, multi, read_stats
     return (
         np.cumsum(plus[:-1]).astype(np.int32),
         np.cumsum(minus[:-1]).astype(np.int32),
         np.cumsum(multi[:-1]).astype(np.int32),
+        read_stats,
     )
+
+
+def count_unique_reads_in_intervals(
+    path: str, intervals: List[Tuple[str, int, int]], cfg: Config
+) -> List[int]:
+    """Count uniquely-mapped reads whose midpoint falls in each interval.
+
+    One targeted fetch per interval (candidate regions are few, so this avoids a
+    second full pass over the BAM). Using the midpoint means a read is counted
+    for at most one region and never double-counts against the annotated count
+    (candidate regions contain no annotated positions).
+    """
+    _require_pysam()
+    bam = open_bam(path)
+    counts: List[int] = []
+    for chrom, start, end in intervals:
+        n = 0
+        try:
+            for read in bam.fetch(chrom, start, end):
+                if read_category(read, cfg) != "unique":
+                    continue
+                rs = read.reference_start
+                re = read.reference_end or (rs + 1)
+                mid = (rs + re) // 2
+                if start <= mid < end:
+                    n += 1
+        except ValueError:
+            pass
+        counts.append(n)
+    bam.close()
+    return counts
 
 
 def iter_reads_over_intervals(
