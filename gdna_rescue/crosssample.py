@@ -77,6 +77,7 @@ class ConsensusConfig:
     min_reciprocal_overlap: float = 0.85
     strand_aware: bool = True
     include_bidirectional: bool = False  # add reproducible bidirectional to GTF
+    reference_gtf: Optional[str] = None  # if set, also emit reference+consensus GTF
     verbose: bool = False
 
     def validate(self) -> None:
@@ -85,6 +86,10 @@ class ConsensusConfig:
         for p in self.tsvs:
             if not os.path.exists(p):
                 raise FileNotFoundError(f"candidate TSV not found: {p!r}")
+        if self.reference_gtf and not os.path.exists(self.reference_gtf):
+            raise FileNotFoundError(
+                f"--reference-gtf not found: {self.reference_gtf!r}"
+            )
         if self.sample_names and len(self.sample_names) != len(self.tsvs):
             raise ValueError("--sample-names count must match --tsv count")
         if self.min_samples < 1:
@@ -364,33 +369,63 @@ def _gtf_attr(d: Dict[str, str]) -> str:
     return " ".join(f'{k} "{v}";' for k, v in d.items())
 
 
+def _consensus_gtf_lines(c: ConsensusRegion) -> List[str]:
+    """transcript + single-exon GTF lines (1-based inclusive) for a region."""
+    name = c.consensus_transcript_name
+    start1 = c.start + 1
+    common = {
+        "gene_id": f"{name}_gene",
+        "transcript_id": name,
+        "gene_name": name,
+        "source": GTF_SOURCE,
+        "consensus_class": c.consensus_class,
+        "n_samples": str(c.n_samples),
+        "samples": ",".join(c.samples),
+        "member_region_ids": ";".join(c.member_region_ids),
+    }
+    tx = _gtf_attr(common)
+    exon = _gtf_attr({**common, "exon_number": "1"})
+    return [
+        f"{c.chrom}\t{GTF_SOURCE}\ttranscript\t{start1}\t{c.end}\t.\t{c.strand}\t.\t{tx}",
+        f"{c.chrom}\t{GTF_SOURCE}\texon\t{start1}\t{c.end}\t.\t{c.strand}\t.\t{exon}",
+    ]
+
+
+def _open_maybe_gz(path: str):
+    import gzip
+    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
+
+
 def write_consensus_gtf(regions: List[ConsensusRegion], path: str) -> int:
+    """Write ONLY the reproducible novel transcripts. Returns count written."""
     kept = [c for c in regions if c.in_consensus_gtf and c.consensus_transcript_name]
     with open(path, "w") as fh:
         fh.write("##description: reproducible novel transcripts (cross-sample consensus)\n")
         for c in kept:
-            name = c.consensus_transcript_name
-            start1 = c.start + 1
-            common = {
-                "gene_id": f"{name}_gene",
-                "transcript_id": name,
-                "gene_name": name,
-                "source": GTF_SOURCE,
-                "consensus_class": c.consensus_class,
-                "n_samples": str(c.n_samples),
-                "samples": ",".join(c.samples),
-                "member_region_ids": ";".join(c.member_region_ids),
-            }
-            tx = _gtf_attr(common)
-            exon = _gtf_attr({**common, "exon_number": "1"})
-            fh.write(
-                f"{c.chrom}\t{GTF_SOURCE}\ttranscript\t{start1}\t{c.end}\t.\t"
-                f"{c.strand}\t.\t{tx}\n"
-            )
-            fh.write(
-                f"{c.chrom}\t{GTF_SOURCE}\texon\t{start1}\t{c.end}\t.\t"
-                f"{c.strand}\t.\t{exon}\n"
-            )
+            for line in _consensus_gtf_lines(c):
+                fh.write(line + "\n")
+    return len(kept)
+
+
+def write_reference_plus_consensus(
+    reference_gtf: str, regions: List[ConsensusRegion], path: str
+) -> int:
+    """Write reference annotation verbatim + reproducible consensus transcripts.
+
+    This is the analysis-ready GTF: run featureCounts on the ORIGINAL STAR BAMs
+    against this single file to quantify both annotated genes and the rescued
+    novel transcripts with consistent feature IDs across all samples.
+    Returns the number of consensus transcripts appended.
+    """
+    kept = [c for c in regions if c.in_consensus_gtf and c.consensus_transcript_name]
+    with open(path, "w") as out:
+        with _open_maybe_gz(reference_gtf) as src:
+            for line in src:
+                out.write(line if line.endswith("\n") else line + "\n")
+        out.write("##gdna_rescue_consensus: appended reproducible novel transcripts\n")
+        for c in kept:
+            for line in _consensus_gtf_lines(c):
+                out.write(line + "\n")
     return len(kept)
 
 
@@ -410,6 +445,7 @@ def write_consensus_summary(
             "min_reciprocal_overlap": cfg.min_reciprocal_overlap,
             "strand_aware": cfg.strand_aware,
             "include_bidirectional": cfg.include_bidirectional,
+            "reference_gtf": cfg.reference_gtf,
         },
         "n_clusters_total": len(regions),
         "n_clusters_passing_min_samples": len(passing),
@@ -445,6 +481,14 @@ def run(cfg: ConsensusConfig) -> dict:
     # keeping every consensus class so recurrent gDNA/artifacts are visible.
     consensus_to_dataframe(passing).write_csv(table, separator="\t")
     n_gtf = write_consensus_gtf(regions, gtf)
+
+    # Analysis-ready GTF (reference + consensus) for featureCounts on the
+    # original STAR BAMs, when a reference annotation is provided.
+    if cfg.reference_gtf:
+        merged = f"{cfg.out_prefix}.reference_plus_consensus.gtf"
+        write_reference_plus_consensus(cfg.reference_gtf, regions, merged)
+        logger.info("Wrote analysis-ready GTF (reference + consensus): %s", merged)
+
     summary = write_consensus_summary(cfg, regions, summ)
 
     logger.info(

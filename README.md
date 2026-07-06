@@ -291,12 +291,18 @@ calls.
 python merge_candidates.py \
   --tsv A.candidate_regions.tsv B.candidate_regions.tsv \
         C.candidate_regions.tsv D.candidate_regions.tsv \
+  --reference-gtf reference.gtf \
   --out-prefix cohort \
   --min-samples 2
 ```
 
 It is pure polars/Python — **no pysam** — so it runs natively anywhere,
 including Windows.
+
+Passing `--reference-gtf` writes `cohort.reference_plus_consensus.gtf`: the
+**analysis-ready annotation** (reference genes + reproducible novel transcripts,
+with feature IDs consistent across all samples). Run `featureCounts` on the
+**original STAR BAMs** against that single GTF — no manual concatenation needed.
 
 ### How matching works
 - Candidates never share exact coordinates across samples, so loci are matched by
@@ -330,6 +336,7 @@ GTF by default.
 --out-prefix cohort           # required
 --min-samples 2               # keep loci present in >= this many samples
 --min-reciprocal-overlap 0.85 # each candidate must cover >= this fraction of the other
+--reference-gtf reference.gtf # if given, also write the analysis-ready reference+consensus GTF
 --ignore-strand               # match regardless of strand (default: strand-aware)
 --include-bidirectional       # also add reproducible bidirectional loci to the GTF
 ```
@@ -339,6 +346,7 @@ GTF by default.
 |------|----------|
 | `cohort.consensus_regions.tsv` | Reproducible clusters: consensus class, n_samples, per-sample classes, union coordinates, mean metrics, provenance |
 | `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` (union span; carries `n_samples`, `samples`, `member_region_ids`) |
+| `cohort.reference_plus_consensus.gtf` | **(with `--reference-gtf`)** reference + consensus — the analysis-ready GTF for featureCounts on the original STAR BAMs |
 | `cohort.consensus_summary.json` | Parameters and counts per consensus class |
 
 Consensus coordinates use the **union span** of the clustered members.
@@ -347,6 +355,36 @@ Consensus coordinates use the **union span** of the clustered members.
 > biology (e.g. a transcript induced in a single condition). It is the right
 > tool for finding *robust* novel transcripts, not a complete catalogue, and it
 > assumes consistent chromosome naming across samples.
+
+---
+
+## Recommended end-to-end pipeline
+
+```
+FastQC / fastp (trim)
+  -> STAR  (2-pass; KEEP multimappers; SortedByCoordinate + samtools index)
+  -> extRNA  detect_gdna_vs_novel.py   (per sample)
+  -> extRNA  merge_candidates.py --reference-gtf reference.gtf   (cohort consensus)
+       => cohort.reference_plus_consensus.gtf
+  -> featureCounts  (ORIGINAL STAR BAMs, matched strandedness)
+  -> edgeR / DESeq2  (differential expression)
+```
+
+Points that matter for correct results:
+
+- **Keep multimappers in the STAR BAM.** extRNA's `likely_multimapper_artifact`
+  detection needs them; if the BAM is pre-filtered to unique-only, that check
+  silently does nothing. Let extRNA separate unique vs multi by MAPQ.
+- **Run the consensus step before featureCounts.** extRNA runs per sample and
+  each sample's `unknown_transcript_N` differ; `merge_candidates.py` collapses
+  them to reproducible `consensus_transcript_N` with IDs consistent across
+  samples. Use `--reference-gtf` to get the single analysis-ready GTF directly.
+- **Match strandedness across tools.** Use extRNA's inferred strandedness (from
+  `summary.json`) for featureCounts `-s` (`-s 1` forward, `-s 2` reverse). This
+  is critical for the antisense/intronic novel features — a wrong `-s` miscounts
+  exactly the loci this tool rescues.
+- **Replicates + low-count filtering** at the DE step; treat novel features as
+  exploratory (approximate single-exon models — sanity-check top hits in IGV).
 
 ---
 

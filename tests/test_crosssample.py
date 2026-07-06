@@ -138,6 +138,32 @@ def test_recurrent_gdna_reported_but_not_in_gtf(tmp_path):
     assert body == []
 
 
+def test_reference_plus_consensus_gtf(tmp_path):
+    # A tiny reference GTF with one gene.
+    ref = tmp_path / "ref.gtf"
+    ref.write_text(
+        'chr1\tsrc\tgene\t100\t500\t.\t+\t.\tgene_id "geneA"; gene_name "geneA";\n'
+        'chr1\tsrc\texon\t100\t500\t.\t+\t.\tgene_id "geneA"; transcript_id "txA";\n'
+    )
+    a = _write_tsv(tmp_path / "A.candidate_regions.tsv",
+                   [("chr1", 1000, 2000, LIKELY_NOVEL, "+")])
+    b = _write_tsv(tmp_path / "B.candidate_regions.tsv",
+                   [("chr1", 1010, 2010, LIKELY_NOVEL, "+")])
+    cfg = ConsensusConfig(tsvs=[a, b], out_prefix=str(tmp_path / "cohort"),
+                          min_samples=2, reference_gtf=str(ref))
+    run(cfg)
+    merged = str(tmp_path / "cohort.reference_plus_consensus.gtf")
+    import os
+    assert os.path.exists(merged)
+    text = open(merged).read()
+    # Reference gene preserved AND consensus transcript appended.
+    assert 'gene_id "geneA"' in text
+    assert 'transcript_id "consensus_transcript_1"' in text
+    # Consensus feature carries genomic union-span coords (1000..2010).
+    assert "\ttranscript\t1000\t2010\t" in text
+    assert "\texon\t1000\t2010\t" in text
+
+
 def test_end_to_end_files_written(tmp_path):
     a = _write_tsv(tmp_path / "A.candidate_regions.tsv",
                    [("chr1", 1000, 2000, LIKELY_NOVEL, "+")])

@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-names", nargs="+", default=None,
                    help="Optional names matching --tsv order (default: from filename).")
     p.add_argument("--out-prefix", required=True, help="Output file prefix.")
+    p.add_argument("--reference-gtf", default=None,
+                   help="Reference GTF. If given, also writes "
+                        "<prefix>.reference_plus_consensus.gtf — the "
+                        "analysis-ready annotation (reference + reproducible novel "
+                        "transcripts) to run featureCounts on the original STAR BAMs.")
     p.add_argument("--min-samples", type=int, default=2,
                    help="Keep loci present in at least this many samples.")
     p.add_argument("--min-reciprocal-overlap", type=float, default=0.85,
@@ -63,6 +68,7 @@ def main(argv=None) -> int:
         min_reciprocal_overlap=args.min_reciprocal_overlap,
         strand_aware=args.strand_aware,
         include_bidirectional=args.include_bidirectional,
+        reference_gtf=args.reference_gtf,
         verbose=args.verbose,
     )
     logger = get_logger(cfg.verbose)
