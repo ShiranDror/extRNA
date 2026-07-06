@@ -1,0 +1,13 @@
+# Core scientific stack (installable everywhere, including Windows):
+numpy>=1.23
+pandas>=1.5
+scipy>=1.9
+polars>=1.0          # cross-sample consensus (merge_candidates.py)
+
+# BAM I/O. pysam has NO Windows wheels; install via bioconda on Linux/macOS/WSL:
+#   conda install -c bioconda pysam
+# (kept here for Linux/macOS pip installs; will fail to build on Windows)
+pysam>=0.21 ; platform_system != "Windows"
+
+# Testing
+pytest>=7.0

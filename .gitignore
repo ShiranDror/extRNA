@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Tool outputs (analysis artifacts should not be committed)
+*.bam
+*.bam.bai
+*.bai
+*.candidate_regions.tsv
+*.candidate_regions.bed
+*.unknown_transcripts.gtf
+*.annotation_plus_unknowns.gtf
+*.summary.json
+*.consensus_regions.tsv
+*.consensus_transcripts.gtf
+*.consensus_summary.json
+*.bedgraph
+
+# Keep small example/test GTFs if intentionally added with -f
