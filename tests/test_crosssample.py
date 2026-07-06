@@ -178,6 +178,33 @@ def test_chrom_column_forced_to_string(tmp_path):
     assert any(r.chrom == "MT" for r in regions)
 
 
+def test_raw_tsv_numeric_chroms_then_mt(tmp_path):
+    # Write a RAW text TSV (not via polars) with 200 numeric-chrom rows then MT,
+    # mimicking production. Header peek must be plain-Python (no polars parse),
+    # and the load must force chrom to string.
+    cols = ["region_id", "chrom", "start", "end", "class", "dominant_strand",
+            "unique_fraction", "dual_strand_fraction", "profile_correlation",
+            "avg_depth"]
+    lines = ["\t".join(cols)]
+    for i in range(200):
+        lines.append("\t".join([f"r{i}", "1", str(1000 + i), str(1500 + i),
+                                 "likely_novel_transcript", "+",
+                                 "1.0", "0.0", "0.0", "20.0"]))
+    lines.append("\t".join(["rMT", "MT", "500", "1500",
+                            "likely_novel_transcript", "+",
+                            "1.0", "0.0", "0.0", "20.0"]))
+    path = tmp_path / "raw.candidate_regions.tsv"
+    path.write_text("\n".join(lines) + "\n")
+
+    cfg = ConsensusConfig(tsvs=[str(path)], out_prefix=str(tmp_path / "co"),
+                          min_samples=1)
+    df = load_candidates(cfg)
+    assert str(df.schema["chrom"]) in ("String", "Utf8")
+    assert df.height == 201
+    regions = build_consensus(df, cfg)
+    assert any(r.chrom == "MT" for r in regions)
+
+
 def test_numeric_only_chrom_still_string(tmp_path):
     # Even when every chromosome value is numeric, chrom must load as string so
     # a later sample with "X"/"MT" merges consistently.

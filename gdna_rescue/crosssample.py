@@ -27,6 +27,7 @@ Pure polars + Python (no pysam), so this runs natively anywhere.
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from dataclasses import dataclass, field
@@ -121,6 +122,19 @@ def _default_sample_name(path: str) -> str:
     return base
 
 
+def _read_header_columns(path: str) -> List[str]:
+    """Read just the header row with plain Python (no polars parsing).
+
+    We must NOT use polars to peek: on some versions ``read_csv(n_rows=0)`` still
+    infers/parses data rows and fails before ``schema_overrides`` can force the
+    chrom column to string.
+    """
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        header = fh.readline().rstrip("\n").rstrip("\r")
+    return header.split("\t")
+
+
 def load_candidates(cfg: ConsensusConfig) -> pl.DataFrame:
     """Load and vertically concatenate per-sample candidate TSVs (tagged)."""
     names = cfg.sample_names or [_default_sample_name(p) for p in cfg.tsvs]
@@ -129,8 +143,8 @@ def load_candidates(cfg: ConsensusConfig) -> pl.DataFrame:
 
     frames = []
     for path, name in zip(cfg.tsvs, names):
-        # Peek at the header so we only override columns that are present.
-        columns = pl.read_csv(path, separator="\t", n_rows=0).columns
+        # Peek at the header (plain read) so we only override columns present.
+        columns = _read_header_columns(path)
         overrides = {c: pl.String for c in columns if c in _STRING_COLS}
         df = pl.read_csv(
             path, separator="\t", schema_overrides=overrides, infer_schema_length=10000
