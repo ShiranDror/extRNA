@@ -139,6 +139,8 @@ samtools index sample.bam
 --threads 4                   # chromosome-level parallelism
 --no-bed                      # skip the BED output
 --emit-bedgraph               # write per-strand candidate bedGraph
+--no-multiqc                  # skip the *.gdna_mqc.tsv MultiQC file
+--sample-name S1              # sample label in the MultiQC row (default: out-prefix basename)
 --verbose
 ```
 
@@ -165,9 +167,33 @@ samtools index sample.bam
 | `sample_analysis.summary.json` | Run parameters, strandedness, class counts |
 | `sample_analysis.candidate_regions.bed` | BED6 of all candidates (optional) |
 | `sample_analysis.candidates.{plus,minus}.bedgraph` | Per-strand depth (with `--emit-bedgraph`) |
+| `sample_analysis.gdna_mqc.tsv` | **MultiQC** custom-content TSV — puts **% gDNA** into the General Statistics table |
 
 **Coordinate conventions:** TSV and GTF are 1-based inclusive; BED/bedGraph are
 0-based half-open.
+
+### MultiQC integration
+
+Each per-sample run writes `sample_analysis.gdna_mqc.tsv`, a MultiQC
+custom-content file (`generalstats` plot type). Point MultiQC at your output
+directory and the **% gDNA** column appears in the General Statistics table, one
+row per sample:
+
+```bash
+multiqc .    # discovers *_mqc.tsv from all samples automatically
+```
+
+The headline metric **`% gDNA`** = uniquely-mapped coverage in gDNA-flagged
+unannotated regions, as a percentage of **all** uniquely-mapped coverage in the
+sample — a library-level contamination proxy. The row also reports the number of
+gDNA regions and the number of rescued novel transcripts. The full breakdown
+(including the candidate-relative percentages and genome-wide coverage totals)
+is in `summary.json` under `gdna_contamination_qc`.
+
+> The percentage covers gDNA-like signal found in *unannotated* candidate
+> regions (annotated exons are not tested for gDNA), so it estimates
+> contamination surfacing as novel-looking signal, not total genomic DNA in the
+> library.
 
 Each rescued transcript carries attributes:
 `gene_id "unknown_transcript_N_gene"`, `transcript_id "unknown_transcript_N"`,
@@ -368,6 +394,9 @@ FastQC / fastp (trim)
        => cohort.reference_plus_consensus.gtf
   -> featureCounts  (ORIGINAL STAR BAMs, matched strandedness)
   -> edgeR / DESeq2  (differential expression)
+
+  (aggregate QC across samples with `multiqc .` — the per-sample
+   *.gdna_mqc.tsv files add a "% gDNA" column to General Statistics)
 ```
 
 Points that matter for correct results:

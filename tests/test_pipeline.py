@@ -42,8 +42,18 @@ def test_full_pipeline_classifies_and_rescues(synthetic):
         ".annotation_plus_unknowns.gtf",
         ".summary.json",
         ".candidate_regions.bed",
+        ".gdna_mqc.tsv",
     ):
         assert os.path.exists(prefix + suffix), suffix
+
+    # MultiQC file: general-stats header + a % gDNA value for the sample.
+    with open(prefix + ".gdna_mqc.tsv") as fh:
+        mqc = fh.read()
+    assert "# plot_type: 'generalstats'" in mqc
+    assert "extrna_pct_gDNA" in mqc
+    # gDNA QC is recorded in the summary JSON too.
+    assert summary["gdna_contamination_qc"]["n_gDNA_regions"] == 1
+    assert summary["gdna_contamination_qc"]["pct_gDNA_of_mapped_coverage"] > 0
 
     # The rescued GTF must contain sequential unknown_transcript names.
     with open(prefix + ".unknown_transcripts.gtf") as fh:

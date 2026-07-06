@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Do not write candidate_regions.bed.")
     misc.add_argument("--emit-bedgraph", action="store_true",
                       help="Write per-strand candidate bedGraph files.")
+    misc.add_argument("--no-multiqc", dest="emit_multiqc", action="store_false",
+                      help="Do not write the *.gdna_mqc.tsv MultiQC file.")
+    misc.add_argument("--sample-name", default=None,
+                      help="Sample label used in the MultiQC row "
+                           "(default: out-prefix basename).")
     misc.add_argument("--verbose", action="store_true")
     return p
 
@@ -117,6 +122,8 @@ def args_to_config(args: argparse.Namespace) -> Config:
         threads=args.threads,
         emit_bed=args.emit_bed,
         emit_bedgraph=args.emit_bedgraph,
+        emit_multiqc=args.emit_multiqc,
+        sample_name=args.sample_name,
         verbose=args.verbose,
     )
 

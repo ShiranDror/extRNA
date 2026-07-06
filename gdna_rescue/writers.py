@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 from typing import Dict, List
 
 import pandas as pd
@@ -167,11 +168,97 @@ def write_bedgraph(candidates: List[Candidate], prefix: str) -> None:
                 fh.write(f"{c.chrom}\t{c.start}\t{c.end}\t{val}\n")
 
 
+def compute_gdna_qc(
+    candidates: List[Candidate],
+    genome_unique_coverage: int,
+    genome_multi_coverage: int,
+) -> Dict:
+    """Compute gDNA contamination QC metrics.
+
+    ``genome_*_coverage`` are genome-wide summed per-base depths (aligned bases)
+    from unique / multimapped reads. The headline metric,
+    ``pct_gDNA_of_mapped_coverage``, is the share of ALL uniquely-mapped signal
+    that falls in gDNA-flagged unannotated regions — a library-level
+    contamination proxy. We also report the share relative to candidate regions
+    only, since gDNA is only tested among unannotated candidates.
+    """
+    def pct(a, b):
+        return round(100.0 * a / b, 4) if b > 0 else 0.0
+
+    cand_cov = sum(c.metrics.total_coverage for c in candidates)
+    cand_bases = sum(c.length for c in candidates)
+    gdna = [c for c in candidates if c.label == LIKELY_GDNA]
+    gdna_cov = sum(c.metrics.total_coverage for c in gdna)
+    gdna_bases = sum(c.length for c in gdna)
+
+    return {
+        "genome_mapped_unique_coverage": genome_unique_coverage,
+        "genome_mapped_multi_coverage": genome_multi_coverage,
+        "candidate_unique_coverage": cand_cov,
+        "candidate_bases": cand_bases,
+        "gDNA_unique_coverage": gdna_cov,
+        "gDNA_bases": gdna_bases,
+        "n_gDNA_regions": len(gdna),
+        "pct_gDNA_of_mapped_coverage": pct(gdna_cov, genome_unique_coverage),
+        "pct_gDNA_of_candidate_coverage": pct(gdna_cov, cand_cov),
+        "pct_gDNA_of_candidate_bases": pct(gdna_bases, cand_bases),
+    }
+
+
+def write_multiqc_tsv(
+    cfg: Config, candidates: List[Candidate], gdna_qc: Dict, path: str
+) -> None:
+    """Write a MultiQC custom-content TSV that feeds the General Statistics table.
+
+    MultiQC auto-detects files matching ``*_mqc.tsv``. The commented YAML header
+    configures the columns; the single data row is keyed by the sample name, so
+    MultiQC merges rows across all samples in a run.
+    """
+    sample = cfg.sample_name or os.path.basename(cfg.out_prefix) or "sample"
+    n_rescued = sum(1 for c in candidates if c.kept)
+
+    header = [
+        "# id: 'extrna_gdna'",
+        "# section_name: 'extRNA gDNA contamination'",
+        "# description: 'gDNA-like signal in unannotated regions and rescued novel transcripts (extRNA).'",
+        "# plot_type: 'generalstats'",
+        "# pconfig:",
+        "#     - extrna_pct_gDNA:",
+        "#         title: '% gDNA'",
+        "#         description: 'Percent of uniquely-mapped coverage in gDNA-flagged unannotated regions'",
+        "#         min: 0",
+        "#         max: 100",
+        "#         suffix: '%'",
+        "#         scale: 'OrRd'",
+        "#         format: '{:,.2f}'",
+        "#     - extrna_gDNA_regions:",
+        "#         title: 'gDNA regions'",
+        "#         description: 'Number of unannotated regions classified as likely gDNA'",
+        "#         format: '{:,.0f}'",
+        "#     - extrna_novel_transcripts:",
+        "#         title: 'novel transcripts'",
+        "#         description: 'Rescued candidate novel transcripts'",
+        "#         format: '{:,.0f}'",
+    ]
+    cols = ["Sample", "extrna_pct_gDNA", "extrna_gDNA_regions", "extrna_novel_transcripts"]
+    row = [
+        sample,
+        f"{gdna_qc['pct_gDNA_of_mapped_coverage']}",
+        f"{gdna_qc['n_gDNA_regions']}",
+        f"{n_rescued}",
+    ]
+    with open(path, "w") as fh:
+        fh.write("\n".join(header) + "\n")
+        fh.write("\t".join(cols) + "\n")
+        fh.write("\t".join(row) + "\n")
+
+
 def write_summary_json(
     cfg: Config,
     candidates: List[Candidate],
     strandedness_metrics: Dict,
     path: str,
+    gdna_qc: Dict | None = None,
 ) -> Dict:
     """Write the run summary and return it."""
     n_gdna = sum(1 for c in candidates if c.label == LIKELY_GDNA)
@@ -192,6 +279,7 @@ def write_summary_json(
         "n_likely_multimapper_artifact": n_multi,
         "n_rescued_unknown_transcripts": len(rescued),
         "total_bases_in_rescued_unknown_transcripts": total_rescued_bases,
+        "gdna_contamination_qc": gdna_qc or {},
     }
     with open(path, "w") as fh:
         json.dump(summary, fh, indent=2, default=str)

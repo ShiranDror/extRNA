@@ -99,6 +99,9 @@ class Config:
     threads: int = 4                     # chromosome-level parallelism.
     emit_bed: bool = True                # write candidate_regions.bed
     emit_bedgraph: bool = False          # write per-strand bedGraph of candidates.
+    emit_multiqc: bool = True            # write *.gdna_mqc.tsv for MultiQC.
+    sample_name: Optional[str] = None    # label used in the MultiQC row (defaults
+                                         # to the out-prefix basename).
     verbose: bool = False
 
     # Populated at run time (not user-set):

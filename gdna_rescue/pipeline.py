@@ -21,14 +21,24 @@ from . import writers
 def _process_one_chrom(
     bam_path: str, chrom: str, length: int, cfg: Config,
     strandedness: str, annotation: Annotation,
-) -> List[Candidate]:
-    """Worker: build strand coverage for one chrom and discover candidates."""
+):
+    """Worker: build strand coverage for one chrom and discover candidates.
+
+    Returns (candidates, total_unique_coverage, total_multi_coverage) where the
+    totals are genome-wide mapped-base counts used for the library-level gDNA
+    contamination percentage (summing the arrays is essentially free).
+    """
     from .bam_io import strand_coverage_for_chrom  # local import: pysam only here
 
     plus, minus, multi = strand_coverage_for_chrom(
         bam_path, chrom, length, cfg, strandedness
     )
-    return build_candidates_for_chrom(chrom, plus, minus, multi, annotation, cfg)
+    total_unique = int(plus.sum()) + int(minus.sum())
+    total_multi = int(multi.sum())
+    candidates = build_candidates_for_chrom(
+        chrom, plus, minus, multi, annotation, cfg
+    )
+    return candidates, total_unique, total_multi
 
 
 def _assign_names(candidates: List[Candidate]) -> None:
@@ -82,6 +92,8 @@ def run(cfg: Config) -> Dict:
     logger.info("Processing %d chromosomes (threads=%d) ...", len(chroms), cfg.threads)
 
     candidates: List[Candidate] = []
+    genome_unique_cov = 0
+    genome_multi_cov = 0
     if cfg.threads > 1 and len(chroms) > 1:
         with ProcessPoolExecutor(max_workers=cfg.threads) as ex:
             futures = {
@@ -91,25 +103,32 @@ def run(cfg: Config) -> Dict:
                 ): chrom
                 for chrom in chroms
             }
-            results: Dict[str, List[Candidate]] = {}
+            results: Dict[str, tuple] = {}
             for fut in as_completed(futures):
                 chrom = futures[fut]
                 results[chrom] = fut.result()
-                logger.debug("Finished %s: %d candidates", chrom, len(results[chrom]))
+                logger.debug("Finished %s: %d candidates", chrom, len(results[chrom][0]))
         # Reassemble in header order for deterministic numbering.
         for chrom in chroms:
-            candidates.extend(results.get(chrom, []))
+            cands, tu, tm = results.get(chrom, ([], 0, 0))
+            candidates.extend(cands)
+            genome_unique_cov += tu
+            genome_multi_cov += tm
     else:
         for chrom in chroms:
-            chrom_cands = _process_one_chrom(
+            chrom_cands, tu, tm = _process_one_chrom(
                 cfg.bam, chrom, chrom_sizes[chrom], cfg, strandedness, annotation
             )
             logger.debug("Finished %s: %d candidates", chrom, len(chrom_cands))
             candidates.extend(chrom_cands)
+            genome_unique_cov += tu
+            genome_multi_cov += tm
 
     # Sort within-chrom by start (header order already applied across chroms).
     candidates.sort(key=lambda c: (chroms.index(c.chrom), c.start, c.end))
     _assign_names(candidates)
+
+    gdna_qc = writers.compute_gdna_qc(candidates, genome_unique_cov, genome_multi_cov)
 
     # --- write outputs ----------------------------------------------------
     tsv = f"{cfg.out_prefix}.candidate_regions.tsv"
@@ -124,7 +143,13 @@ def run(cfg: Config) -> Dict:
         writers.write_bed(candidates, f"{cfg.out_prefix}.candidate_regions.bed")
     if cfg.emit_bedgraph:
         writers.write_bedgraph(candidates, cfg.out_prefix)
-    summary = writers.write_summary_json(cfg, candidates, strand_metrics, summary_json)
+    summary = writers.write_summary_json(
+        cfg, candidates, strand_metrics, summary_json, gdna_qc=gdna_qc
+    )
+    if cfg.emit_multiqc:
+        writers.write_multiqc_tsv(
+            cfg, candidates, gdna_qc, f"{cfg.out_prefix}.gdna_mqc.tsv"
+        )
 
     logger.info(
         "Done. %d candidate regions | %d likely_gDNA | %d bidirectional | "
@@ -135,6 +160,12 @@ def run(cfg: Config) -> Dict:
         summary["n_likely_novel_transcript"],
         summary["n_likely_multimapper_artifact"],
         n_unknown,
+    )
+    logger.info(
+        "gDNA-like signal: %.2f%% of mapped unique coverage (%.2f%% of candidate "
+        "coverage).",
+        gdna_qc["pct_gDNA_of_mapped_coverage"],
+        gdna_qc["pct_gDNA_of_candidate_coverage"],
     )
     logger.info("Outputs written with prefix: %s", cfg.out_prefix)
     return summary
