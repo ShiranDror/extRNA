@@ -12,6 +12,15 @@ asking "does this look like a spliced mRNA?", it asks:
 > it came from **double-stranded genomic DNA** (both strands, symmetric, broad,
 > correlated/flat) or from **transcription** (dominantly one strand, coherent)?
 
+> **Scope: this tool is for STRANDED RNA-seq libraries** (forward /
+> fr-secondstrand, or reverse / fr-firststrand / dUTP). The whole method rests on
+> comparing the two transcription strands, which only carries information when
+> the library preserves strand. **Unstranded libraries are out of scope** — in an
+> unstranded library even genuine single-strand RNA maps to both strands ~50/50,
+> so gDNA-vs-RNA cannot be told apart by strand symmetry. The tool will run on
+> unstranded data and warn, but its calls are not meaningful there; don't use it
+> for unstranded libraries.
+
 ---
 
 ## Why this tool exists
@@ -133,8 +142,8 @@ samtools index sample.bam
 --min-region-length 200       # discard shorter candidate intervals
 --min-covered-bases 100       # discard regions with fewer covered bases
 --min-covered-fraction 0.7    # discard sparse/punctate regions
---annotation-mode exon        # exon | transcript | gene | all
---library-strandedness auto   # auto | forward | reverse | unstranded
+--annotation-mode exon        # what counts as "annotated" (see Annotation modes below)
+--library-strandedness auto   # auto | forward | reverse  (unstranded is out of scope)
 --nearest-feature-window 10000
 --threads 4                   # chromosome-level parallelism
 --no-bed                      # skip the BED output
@@ -171,6 +180,32 @@ samtools index sample.bam
 
 **Coordinate conventions:** TSV and GTF are 1-based inclusive; BED/bedGraph are
 0-based half-open.
+
+### Annotation modes
+
+`--annotation-mode` sets what is treated as "annotated" and therefore **masked
+out** before discovery — i.e. what is *not* eligible to become a novel candidate:
+
+| Mode | Masks | Introns discoverable? |
+|------|-------|-----------------------|
+| `exon` (default) | exon features only | **yes** — introns are unmasked, so intronic (e.g. pre-mRNA / retained-intron) signal can be rescued |
+| `transcript` | full transcript spans (exons + introns) | no — the whole transcript body is masked |
+| `gene` | full gene spans (exons + introns) | no — the whole gene body is masked |
+| `all` | **every feature line in the GTF** (gene, transcript, exon, CDS, UTR, codons, …) | no — because gene/transcript lines span the locus, `all` masks the entire gene body, introns included |
+
+So `all` is the **most aggressive** mask: any base mentioned by any feature is
+excluded. Since gene/transcript records span introns, `all` behaves like `gene`
+(introns masked) plus every sub-feature — use it when you only want to discover
+signal in regions the GTF never mentions at all (strictly intergenic). Use `exon`
+(the default) if you want to recover intronic/pre-mRNA and antisense-in-intron
+signal; use `gene`/`transcript`/`all` if you consider anything inside a gene body
+to be "already annotated."
+
+> Masking is **positional (strand-agnostic)**: a base annotated on either strand
+> is masked on both. So antisense signal lying directly over an annotated exon is
+> not discovered in any mode; antisense is only recovered where it does not
+> overlap a masked feature (e.g. intronic-antisense in `exon` mode, or
+> intergenic).
 
 ### MultiQC integration
 
@@ -460,10 +495,12 @@ integration test asserts they are classified and rescued as expected.
   unannotated genes will appear as candidates (that is partly the point), but a
   sparse annotation will produce many candidates; use a complete, matched
   annotation.
-- **Unstranded libraries cannot be assessed for gDNA by strand symmetry.** In an
+- **Unstranded libraries are out of scope.** The method compares transcription
+  strands, which is only informative when the library preserves strand. In an
   unstranded library even genuine single-strand RNA maps to both strands ~50/50,
-  so the core discriminator is uninformative. The tool warns loudly and you
-  should not trust `likely_gDNA` calls on unstranded data.
+  so gDNA cannot be told from RNA by strand symmetry. The tool runs and warns on
+  unstranded input, but its classifications are not meaningful there — this tool
+  is designed for stranded (forward / reverse) RNA-seq only.
 - **Multimapper filtering is coverage-based, not locus-resolved.** A region is
   flagged when multimapped reads dominate its coverage; the tool does not resolve
   where those reads truly originate. Genuine transcripts from recently-duplicated
