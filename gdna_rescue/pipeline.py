@@ -20,27 +20,37 @@ from . import writers
 
 def _process_one_chrom(
     bam_path: str, chrom: str, length: int, cfg: Config,
-    strandedness: str, annotation: Annotation,
+    strandedness: str, annotation: Annotation, stranded_masking: bool,
 ):
     """Worker: build strand coverage for one chrom and discover candidates.
 
-    Returns (candidates, total_unique_coverage, total_multi_coverage) where the
-    totals are genome-wide mapped-base counts used for the library-level gDNA
-    contamination percentage (summing the arrays is essentially free).
+    Returns (candidates, total_unique_coverage, total_multi_coverage, read_stats)
+    where the totals are genome-wide mapped-base counts used for the
+    library-level gDNA contamination percentage (summing the arrays is free).
     """
     from .bam_io import strand_coverage_for_chrom  # local import: pysam only here
 
-    annotated_mask = annotation.mask_array(chrom, length)
     exon_mask = annotation.exon_mask_array(chrom, length)
+    if stranded_masking:
+        plus_mask, minus_mask = annotation.stranded_mask_arrays(chrom, length)
+        ann_plus, ann_minus = plus_mask, minus_mask
+    else:
+        positional = annotation.mask_array(chrom, length)
+        ann_plus = ann_minus = positional
 
+    # Note: reads' annotated-count uses the strand-appropriate mask; total_unique
+    # coverage is summed BEFORE build_candidates mutates the arrays (stranded
+    # masking zeroes masked positions in place).
     plus, minus, multi, read_stats = strand_coverage_for_chrom(
-        bam_path, chrom, length, cfg, strandedness, annotated_mask=annotated_mask
+        bam_path, chrom, length, cfg, strandedness,
+        annotated_mask_plus=ann_plus, annotated_mask_minus=ann_minus,
     )
     total_unique = int(plus.sum()) + int(minus.sum())
     total_multi = int(multi.sum())
     candidates = build_candidates_for_chrom(
         chrom, plus, minus, multi, annotation, cfg,
-        annotated_mask=annotated_mask, exon_mask=exon_mask,
+        annotated_mask=(None if stranded_masking else ann_plus),
+        exon_mask=exon_mask, stranded_masking=stranded_masking,
     )
     return candidates, total_unique, total_multi, read_stats
 
@@ -92,6 +102,19 @@ def run(cfg: Config) -> Dict:
     cfg.inferred_strandedness = strandedness
     cfg.strandedness_metrics = strand_metrics
 
+    # Stranded masking only applies to stranded libraries; unstranded falls back
+    # to positional masking (per-strand feature assignment is meaningless there).
+    stranded_masking = cfg.stranded_masking and strandedness in ("forward", "reverse")
+    if cfg.stranded_masking and not stranded_masking:
+        logger.info(
+            "Stranded masking requested but library is %s; using positional "
+            "(strand-agnostic) masking.", strandedness,
+        )
+    logger.info(
+        "Annotation masking: %s.",
+        "stranded (per-strand)" if stranded_masking else "positional",
+    )
+
     chroms = [c for c in chrom_sizes if chrom_sizes[c] > 0]
     logger.info("Processing %d chromosomes (threads=%d) ...", len(chroms), cfg.threads)
 
@@ -113,7 +136,7 @@ def run(cfg: Config) -> Dict:
             futures = {
                 ex.submit(
                     _process_one_chrom, cfg.bam, chrom, chrom_sizes[chrom],
-                    cfg, strandedness, annotation,
+                    cfg, strandedness, annotation, stranded_masking,
                 ): chrom
                 for chrom in chroms
             }
@@ -131,7 +154,8 @@ def run(cfg: Config) -> Dict:
     else:
         for chrom in chroms:
             chrom_cands, tu, tm, rs = _process_one_chrom(
-                cfg.bam, chrom, chrom_sizes[chrom], cfg, strandedness, annotation
+                cfg.bam, chrom, chrom_sizes[chrom], cfg, strandedness, annotation,
+                stranded_masking,
             )
             logger.debug("Finished %s: %d candidates", chrom, len(chrom_cands))
             candidates.extend(chrom_cands)
@@ -147,8 +171,13 @@ def run(cfg: Config) -> Dict:
     read_assignment = None
     if cfg.emit_multiqc:
         from .bam_io import count_unique_reads_in_intervals
-        intervals = [(c.chrom, c.start, c.end) for c in candidates]
-        region_reads = count_unique_reads_in_intervals(cfg.bam, intervals, cfg)
+        intervals = [
+            (c.chrom, c.start, c.end, c.metrics.dominant_strand) for c in candidates
+        ]
+        region_reads = count_unique_reads_in_intervals(
+            cfg.bam, intervals, cfg, strandedness=strandedness,
+            strand_filter=stranded_masking,
+        )
         read_assignment = writers.compute_read_assignment(
             candidates, region_reads,
             read_totals["n_unique_reads"],

@@ -129,6 +129,7 @@ def build_candidates_for_chrom(
     cfg: Config,
     annotated_mask: "np.ndarray | None" = None,
     exon_mask: "np.ndarray | None" = None,
+    stranded_masking: bool = False,
 ) -> List[Candidate]:
     """Discover intervals on a chromosome and attach metrics + context.
 
@@ -136,19 +137,37 @@ def build_candidates_for_chrom(
     them globally and assigns unknown_transcript names after gathering all
     chromosomes so ordering is deterministic. Masks may be passed in to avoid
     rebuilding them when the caller already has them.
+
+    When ``stranded_masking`` is True, each strand's coverage is masked only
+    where a feature on THAT strand is annotated, so antisense-over-feature signal
+    stays discoverable. Region metrics are then computed on the masked coverage
+    so a masked strand (e.g. the host mRNA over a sense exon) does not count.
     """
     length = plus_cov.size
-    if annotated_mask is None:
-        annotated_mask = annotation.mask_array(chrom, length)
     if exon_mask is None:
         exon_mask = annotation.exon_mask_array(chrom, length)
 
-    intervals = discover_intervals(plus_cov, minus_cov, annotated_mask, cfg)
+    if stranded_masking:
+        plus_mask, minus_mask = annotation.stranded_mask_arrays(chrom, length)
+        # Zero out each strand where a same-strand feature is annotated. We
+        # operate in place; the caller does not reuse these arrays afterwards.
+        eff_plus = plus_cov
+        eff_minus = minus_cov
+        eff_plus[plus_mask] = 0
+        eff_minus[minus_mask] = 0
+        disc_mask = plus_mask & minus_mask   # only both-strand-annotated blocks merges
+    else:
+        if annotated_mask is None:
+            annotated_mask = annotation.mask_array(chrom, length)
+        eff_plus, eff_minus = plus_cov, minus_cov
+        disc_mask = annotated_mask
+
+    intervals = discover_intervals(eff_plus, eff_minus, disc_mask, cfg)
 
     candidates: List[Candidate] = []
     for idx, (start, end) in enumerate(intervals):
-        p = plus_cov[start:end]
-        m = minus_cov[start:end]
+        p = eff_plus[start:end]
+        m = eff_minus[start:end]
         mm = multi_cov[start:end]
         metrics = compute_region_metrics(p, m, cfg, multi_cov=mm)
         label, reason, flags = classify_region(metrics, cfg)

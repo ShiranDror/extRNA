@@ -70,6 +70,10 @@ class Config:
     annotation_mode: str = "exon"        # exon | transcript | gene | all
     nearest_feature_window: int = 10000  # window used when reporting nearest feature
                                          # / deciding intergenic vs near-gene context.
+    stranded_masking: bool = True        # mask annotation per-strand (stranded libs
+                                         # only) so antisense-over-feature signal
+                                         # stays discoverable; auto-falls back to
+                                         # positional masking for unstranded libs.
 
     # --- Library strandedness --------------------------------------------
     library_strandedness: str = "auto"   # auto | forward | reverse | unstranded

@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     ann = p.add_argument_group("annotation")
     ann.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="exon")
     ann.add_argument("--nearest-feature-window", type=int, default=10000)
+    ann.add_argument("--no-stranded-masking", dest="stranded_masking",
+                     action="store_false",
+                     help="Use positional (strand-agnostic) masking even for "
+                          "stranded libraries. Default masks per-strand so "
+                          "antisense-over-feature signal stays discoverable.")
 
     strand = p.add_argument_group("library strandedness")
     strand.add_argument("--library-strandedness", choices=STRANDEDNESS_CHOICES,
@@ -109,6 +114,7 @@ def args_to_config(args: argparse.Namespace) -> Config:
         min_covered_fraction=args.min_covered_fraction,
         annotation_mode=args.annotation_mode,
         nearest_feature_window=args.nearest_feature_window,
+        stranded_masking=args.stranded_masking,
         library_strandedness=args.library_strandedness,
         strand_infer_max_reads=args.strand_infer_max_reads,
         strand_infer_min_confidence=args.strand_infer_min_confidence,

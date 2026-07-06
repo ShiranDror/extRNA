@@ -143,6 +143,7 @@ samtools index sample.bam
 --min-covered-bases 100       # discard regions with fewer covered bases
 --min-covered-fraction 0.7    # discard sparse/punctate regions
 --annotation-mode exon        # what counts as "annotated" (see Annotation modes below)
+--no-stranded-masking         # force positional masking (default: per-strand for stranded libs)
 --library-strandedness auto   # auto | forward | reverse  (unstranded is out of scope)
 --nearest-feature-window 10000
 --threads 4                   # chromosome-level parallelism
@@ -201,11 +202,18 @@ signal in regions the GTF never mentions at all (strictly intergenic). Use `exon
 signal; use `gene`/`transcript`/`all` if you consider anything inside a gene body
 to be "already annotated."
 
-> Masking is **positional (strand-agnostic)**: a base annotated on either strand
-> is masked on both. So antisense signal lying directly over an annotated exon is
-> not discovered in any mode; antisense is only recovered where it does not
-> overlap a masked feature (e.g. intronic-antisense in `exon` mode, or
-> intergenic).
+**Stranded vs positional masking.** For stranded libraries the mask is applied
+**per strand** by default: a `+` feature masks only the `+` strand, so
+**antisense transcription lying directly over an annotated feature stays
+discoverable** (and is labelled `antisense_to_gene`). Region metrics are then
+computed on the masked coverage, so the host gene's sense signal over that
+feature does not count toward the antisense candidate. This only applies to
+stranded (forward/reverse) libraries; for unstranded input the tool
+automatically falls back to **positional (strand-agnostic)** masking (a base
+annotated on either strand is masked on both), and `--no-stranded-masking`
+forces positional masking for any library. Under positional masking, antisense
+over an annotated feature is not recovered — only antisense that does not overlap
+a masked feature (e.g. intronic-antisense in `exon` mode, or intergenic).
 
 ### MultiQC integration
 
@@ -428,6 +436,34 @@ Consensus coordinates use the **union span** of the clustered members.
 
 ---
 
+## Extracting novel-transcript sequences (FASTA)
+
+`extract_novel_fasta.py` pulls the sequences of rescued novel transcripts out of
+a genome FASTA, ready for BLAST / ORF / homology / annotation work:
+
+```bash
+# from a per-sample run:
+python extract_novel_fasta.py --genome genome.fa \
+  --gtf sample_analysis.unknown_transcripts.gtf --out sample_analysis.novel.fa
+
+# from the cross-sample consensus:
+python extract_novel_fasta.py --genome genome.fa \
+  --gtf cohort.consensus_transcripts.gtf --out cohort.novel.fa
+```
+
+- Exons of each transcript are concatenated in coordinate order (single-exon
+  novel models are just their span), and the sequence is **reverse-complemented
+  for `-` strand** transcripts, so the FASTA is in 5'→3' transcript orientation.
+- FASTA headers carry provenance: `>transcript_id gene_id=… strand=… loc=chr:start-end(strand) class=… length=…`.
+- If you point it at a merged GTF (reference + rescued), use `--source
+  gdna_rescue` / `--source gdna_rescue_consensus` to extract only the rescued
+  features.
+- A genome `.fai` index is built automatically if absent. Uses pysam when
+  available, and a dependency-free indexed reader otherwise (so it runs on
+  native Windows too).
+
+---
+
 ## Recommended end-to-end pipeline
 
 ```
@@ -436,6 +472,8 @@ FastQC / fastp (trim)
   -> extRNA  detect_gdna_vs_novel.py   (per sample)
   -> extRNA  merge_candidates.py --reference-gtf reference.gtf   (cohort consensus)
        => cohort.reference_plus_consensus.gtf
+       (optional: extract_novel_fasta.py --gtf cohort.consensus_transcripts.gtf
+        => cohort.novel.fa for BLAST/ORF/annotation of the rescued transcripts)
   -> featureCounts  (ORIGINAL STAR BAMs, matched strandedness)
   -> edgeR / DESeq2  (differential expression)
 
@@ -535,6 +573,7 @@ integration test asserts they are classified and rescued as expected.
 ```
 detect_gdna_vs_novel.py     # thin CLI entry point (per-sample analysis)
 merge_candidates.py         # thin CLI entry point (cross-sample consensus)
+extract_novel_fasta.py      # thin CLI entry point (novel-transcript FASTA)
 gdna_rescue/
   config.py        # all tunable thresholds (Config dataclass)
   utils.py         # logging + interval maths (no pysam)
@@ -546,6 +585,7 @@ gdna_rescue/
   writers.py       # TSV / GTF / JSON / BED / bedGraph
   pipeline.py      # orchestration (chromosome-wise, optional multiprocessing)
   crosssample.py   # cross-sample consensus / reproducibility filter (polars only)
+  fasta.py         # genome-FASTA reader + novel-transcript sequence extraction
   cli.py           # argument parsing
 tests/
   generate_test_data.py   # synthetic archetypes + synthetic BAM/GTF
@@ -553,5 +593,7 @@ tests/
   test_discovery.py       # discovery/merging unit tests
   test_strandedness.py    # read -> strand mapping unit tests
   test_crosssample.py     # cross-sample consensus unit tests (polars)
+  test_qc.py              # gDNA QC + read-assignment + MultiQC writer tests
+  test_fasta.py           # FASTA reader + novel-transcript extraction tests
   test_pipeline.py        # end-to-end integration (needs pysam)
 ```

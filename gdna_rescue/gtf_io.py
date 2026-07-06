@@ -39,6 +39,10 @@ class Annotation:
 
     # chrom -> list of merged [start, end) intervals used for masking.
     mask_intervals: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
+    # Per-strand masks for stranded libraries (antisense-over-feature stays
+    # discoverable because only the feature's own strand is masked).
+    mask_intervals_plus: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
+    mask_intervals_minus: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
     # chrom -> merged exon intervals (used to distinguish intronic vs exonic).
     exon_intervals: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
     # chrom -> list of (start, end, strand) exons, kept for strandedness
@@ -75,6 +79,26 @@ class Annotation:
             if e > s:
                 mask[s:e] = True
         return mask
+
+    def stranded_mask_arrays(self, chrom: str, length: int):
+        """Return (plus_mask, minus_mask) boolean arrays for stranded masking.
+
+        ``plus_mask`` marks positions annotated by a + (or strandless) feature,
+        ``minus_mask`` positions annotated by a - (or strandless) feature.
+        """
+        def build(intervals):
+            m = np.zeros(length, dtype=bool)
+            for start, end in intervals:
+                s = max(0, start)
+                e = min(length, end)
+                if e > s:
+                    m[s:e] = True
+            return m
+
+        return (
+            build(self.mask_intervals_plus.get(chrom, [])),
+            build(self.mask_intervals_minus.get(chrom, [])),
+        )
 
     def nearest_gene(
         self, chrom: str, start: int, end: int
@@ -133,7 +157,9 @@ def parse_gtf(path: str, annotation_mode: str) -> Annotation:
     ann = Annotation()
 
     # Raw interval accumulators before merging.
-    mask_raw: Dict[str, List[Tuple[int, int]]] = {}
+    mask_raw: Dict[str, List[Tuple[int, int]]] = {}          # positional (any strand)
+    mask_raw_plus: Dict[str, List[Tuple[int, int]]] = {}     # + features only
+    mask_raw_minus: Dict[str, List[Tuple[int, int]]] = {}    # - features only
     exon_raw: Dict[str, List[Tuple[int, int]]] = {}
     genes_seen: Dict[str, Gene] = {}
     # For transcript-span mode when explicit 'transcript' lines are absent.
@@ -141,6 +167,20 @@ def parse_gtf(path: str, annotation_mode: str) -> Annotation:
 
     def add(dic, chrom, start, end):
         dic.setdefault(chrom, []).append((start, end))
+
+    def add_mask(chrom, start, end, strand):
+        """Record a masked interval both positionally and per-strand.
+
+        Strandless features ('.') are masked on both strands (they block
+        discovery on either strand)."""
+        add(mask_raw, chrom, start, end)
+        if strand == "+":
+            add(mask_raw_plus, chrom, start, end)
+        elif strand == "-":
+            add(mask_raw_minus, chrom, start, end)
+        else:
+            add(mask_raw_plus, chrom, start, end)
+            add(mask_raw_minus, chrom, start, end)
 
     with _open(path) as fh:
         for line in fh:
@@ -185,23 +225,23 @@ def parse_gtf(path: str, annotation_mode: str) -> Annotation:
 
             # Build the mask according to mode.
             if annotation_mode == "all":
-                add(mask_raw, chrom, start, end)
+                add_mask(chrom, start, end, strand)
             elif annotation_mode == "exon" and feature == "exon":
-                add(mask_raw, chrom, start, end)
+                add_mask(chrom, start, end, strand)
             elif annotation_mode == "gene" and feature == "gene":
-                add(mask_raw, chrom, start, end)
+                add_mask(chrom, start, end, strand)
             elif annotation_mode == "transcript" and feature == "transcript":
-                add(mask_raw, chrom, start, end)
+                add_mask(chrom, start, end, strand)
 
     # If we asked for transcript/gene masking but the GTF lacked those explicit
     # feature lines, fall back to aggregated transcript spans.
     if annotation_mode == "transcript" and not any(mask_raw.values()):
         for tid, (chrom, start, end, strand) in tx_span.items():
-            add(mask_raw, chrom, start, end)
+            add_mask(chrom, start, end, strand)
     if annotation_mode == "gene" and not genes_seen:
         # No gene lines: aggregate transcript spans as a proxy for genes.
         for tid, (chrom, start, end, strand) in tx_span.items():
-            add(mask_raw, chrom, start, end)
+            add_mask(chrom, start, end, strand)
 
     # If no explicit gene lines exist, synthesise genes from transcript spans so
     # context labelling still works.
@@ -212,6 +252,10 @@ def parse_gtf(path: str, annotation_mode: str) -> Annotation:
     # Merge raw intervals per chrom (sorted, gap 0 = touching allowed).
     for chrom, ivals in mask_raw.items():
         ann.mask_intervals[chrom] = merge_runs_with_gap(ivals, max_gap=0)
+    for chrom, ivals in mask_raw_plus.items():
+        ann.mask_intervals_plus[chrom] = merge_runs_with_gap(ivals, max_gap=0)
+    for chrom, ivals in mask_raw_minus.items():
+        ann.mask_intervals_minus[chrom] = merge_runs_with_gap(ivals, max_gap=0)
     for chrom, ivals in exon_raw.items():
         ann.exon_intervals[chrom] = merge_runs_with_gap(ivals, max_gap=0)
 

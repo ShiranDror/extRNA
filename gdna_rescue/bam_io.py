@@ -120,7 +120,8 @@ def strand_coverage_for_chrom(
     length: int,
     cfg: Config,
     strandedness: str,
-    annotated_mask: "np.ndarray | None" = None,
+    annotated_mask_plus: "np.ndarray | None" = None,
+    annotated_mask_minus: "np.ndarray | None" = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Return (plus_unique, minus_unique, multi, read_stats).
 
@@ -129,8 +130,10 @@ def strand_coverage_for_chrom(
     strand-agnostic coverage from multimapped/secondary reads.
 
     ``read_stats`` counts reads (not coverage) for QC: total unique reads, unique
-    reads whose midpoint falls in an annotated feature, and multimapped reads.
-    Counting by read midpoint keeps this O(1) per read within the existing pass.
+    reads whose midpoint falls in an annotated feature ON THAT READ'S
+    transcription strand, and multimapped reads. Passing the same positional mask
+    as both plus/minus reproduces strand-agnostic counting. Counting by read
+    midpoint keeps this O(1) per read within the existing pass.
 
     Uses difference-array accumulation over aligned blocks (fast path) or a
     per-base loop when base-quality filtering is requested.
@@ -177,13 +180,14 @@ def strand_coverage_for_chrom(
             continue
         # unique read
         n_unique += 1
-        if annotated_mask is not None:
+        strand = transcription_strand(read, strandedness)
+        strand_mask = annotated_mask_plus if strand == "+" else annotated_mask_minus
+        if strand_mask is not None:
             rs = read.reference_start
             re = read.reference_end or (rs + 1)
             mid = (rs + re) // 2
-            if 0 <= mid < length and annotated_mask[mid]:
+            if 0 <= mid < length and strand_mask[mid]:
                 n_unique_annotated += 1
-        strand = transcription_strand(read, strandedness)
         _add_blocks(plus if strand == "+" else minus, read)
 
     bam.close()
@@ -205,20 +209,30 @@ def strand_coverage_for_chrom(
 
 
 def count_unique_reads_in_intervals(
-    path: str, intervals: List[Tuple[str, int, int]], cfg: Config
+    path: str,
+    intervals: List[Tuple[str, int, int, str]],
+    cfg: Config,
+    strandedness: str = "unstranded",
+    strand_filter: bool = False,
 ) -> List[int]:
     """Count uniquely-mapped reads whose midpoint falls in each interval.
 
-    One targeted fetch per interval (candidate regions are few, so this avoids a
-    second full pass over the BAM). Using the midpoint means a read is counted
-    for at most one region and never double-counts against the annotated count
-    (candidate regions contain no annotated positions).
+    ``intervals`` are (chrom, start, end, strand). One targeted fetch per
+    interval (candidate regions are few, so this avoids a second full pass).
+    Using the midpoint means a read is counted for at most one region.
+
+    When ``strand_filter`` is True (stranded masking), only reads whose
+    transcription strand matches the region's strand are counted — so a region
+    discovered as antisense over an annotated exon does not also count the host
+    gene's sense reads (which are counted as annotated instead). A region strand
+    of '.' counts both strands.
     """
     _require_pysam()
     bam = open_bam(path)
     counts: List[int] = []
-    for chrom, start, end in intervals:
+    for chrom, start, end, region_strand in intervals:
         n = 0
+        want = region_strand if region_strand in ("+", "-") else None
         try:
             for read in bam.fetch(chrom, start, end):
                 if read_category(read, cfg) != "unique":
@@ -226,8 +240,12 @@ def count_unique_reads_in_intervals(
                 rs = read.reference_start
                 re = read.reference_end or (rs + 1)
                 mid = (rs + re) // 2
-                if start <= mid < end:
-                    n += 1
+                if not (start <= mid < end):
+                    continue
+                if strand_filter and want is not None:
+                    if transcription_strand(read, strandedness) != want:
+                        continue
+                n += 1
         except ValueError:
             pass
         counts.append(n)

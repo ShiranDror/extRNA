@@ -73,6 +73,47 @@ def test_gap_merging_in_discovery(cfg):
     assert (500, 1000) in intervals
 
 
+def test_stranded_masking_discovers_antisense_over_exon(tmp_path):
+    from gdna_rescue.gtf_io import parse_gtf
+    from gdna_rescue.discovery import build_candidates_for_chrom, CTX_ANTISENSE
+    from gdna_rescue.classify import LIKELY_NOVEL
+
+    gtf = tmp_path / "a.gtf"
+    gtf.write_text(
+        'chr1\tsim\tgene\t1001\t2000\t.\t+\t.\tgene_id "g"; gene_name "g";\n'
+        'chr1\tsim\texon\t1001\t2000\t.\t+\t.\tgene_id "g"; transcript_id "t";\n'
+    )
+    ann = parse_gtf(str(gtf), "exon")
+    cfg = Config()  # min_region_length 200, min_depth 10, min_covered_fraction 0.7
+
+    n = 3000
+    plus = np.zeros(n, dtype=np.int32)
+    minus = np.zeros(n, dtype=np.int32)
+    multi = np.zeros(n, dtype=np.int32)
+    plus[1000:2000] = 25    # host mRNA on + (annotated exon)
+    minus[1000:2000] = 15   # antisense transcription on - (novel)
+
+    # Positional masking: exon masks BOTH strands -> nothing discovered there.
+    pos = build_candidates_for_chrom(
+        "chr1", plus.copy(), minus.copy(), multi.copy(), ann, cfg,
+        stranded_masking=False,
+    )
+    assert pos == [] or all(not (c.start < 2000 and c.end > 1000) for c in pos)
+
+    # Stranded masking: only + is masked over the + exon, so the - antisense
+    # region IS discovered, labelled antisense, and rescued as novel.
+    st = build_candidates_for_chrom(
+        "chr1", plus.copy(), minus.copy(), multi.copy(), ann, cfg,
+        stranded_masking=True,
+    )
+    over = [c for c in st if c.start < 2000 and c.end > 1000]
+    assert len(over) == 1
+    c = over[0]
+    assert c.metrics.dominant_strand == "-"
+    assert c.context_label == CTX_ANTISENSE
+    assert c.label == LIKELY_NOVEL
+
+
 def test_low_covered_fraction_filtered():
     cfg = Config(min_depth=3, max_gap=0, min_region_length=100,
                  min_covered_fraction=0.9, min_covered_bases=0)
