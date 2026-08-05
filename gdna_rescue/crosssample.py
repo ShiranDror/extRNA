@@ -21,6 +21,9 @@ Design decisions (see README):
     reported in the table but NOT added to the GTF: recurrent contamination is
     worth investigating (and confirming biochemically) but must not be added to
     an annotation. Losing a true annotation is preferable to adding a bad one.
+  * External annotation (--annotate) is attached AFTER clustering and voting.
+    It adds columns to the consensus table; it never changes a class. See
+    ``overlay.py`` for why that separation matters.
 
 Pure polars + Python (no pysam), so this runs natively anywhere.
 """
@@ -40,6 +43,14 @@ from .classify import (
     LIKELY_MULTIMAPPER,
     LIKELY_NOVEL,
     POSSIBLE_BIDIRECTIONAL,
+)
+from .overlay import (
+    OverlayIndex,
+    annotate_region,
+    annotation_name_token,
+    check_chrom_compatibility,
+    load_sources,
+    overlay_columns,
 )
 
 # Consensus-level classes.
@@ -90,6 +101,14 @@ class ConsensusConfig:
     strand_aware: bool = True
     include_bidirectional: bool = False  # add reproducible bidirectional to GTF
     reference_gtf: Optional[str] = None  # if set, also emit reference+consensus GTF
+    # External annotation overlay (GFF3/GFF/GTF); each spec is 'path' or 'label=path'.
+    annotate: List[str] = field(default_factory=list)
+    annotate_labels: Optional[List[str]] = None
+    annotate_feature_types: Optional[List[str]] = None
+    annotate_nearest_window: int = 10000
+    annotate_stranded: bool = False
+    # Append the overlapping feature type to consensus transcript names.
+    annotate_names: bool = True
     verbose: bool = False
 
     def validate(self) -> None:
@@ -108,6 +127,10 @@ class ConsensusConfig:
             raise ValueError("--min-samples must be >= 1")
         if not (0.0 < self.min_reciprocal_overlap <= 1.0):
             raise ValueError("--min-reciprocal-overlap must be in (0, 1]")
+        if self.annotate_labels and len(self.annotate_labels) != len(self.annotate):
+            raise ValueError("--annotate-labels count must match --annotate count")
+        if self.annotate_nearest_window < 0:
+            raise ValueError("--annotate-nearest-window must be >= 0")
 
 
 # --------------------------------------------------------------------------- #
@@ -266,6 +289,10 @@ class ConsensusRegion:
     passes_min_samples: bool
     in_consensus_gtf: bool
     consensus_transcript_name: Optional[str] = None
+    # External-annotation overlay: flat {column_name: value} for the table, plus
+    # {source_label: {feature_type: count}} for the summary cross-tab.
+    annotations: Dict[str, object] = field(default_factory=dict)
+    overlay_types: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 def _mean_opt(rows: List[dict], key: str) -> Optional[float]:
@@ -348,10 +375,106 @@ def build_consensus(df: pl.DataFrame, cfg: ConsensusConfig) -> List[ConsensusReg
 
 
 # --------------------------------------------------------------------------- #
+# External annotation overlay
+# --------------------------------------------------------------------------- #
+
+def annotate_consensus(
+    regions: List[ConsensusRegion],
+    indexes: List[OverlayIndex],
+    cfg: ConsensusConfig,
+) -> List[dict]:
+    """Attach external-annotation columns to every consensus region in place.
+
+    Runs after classification and voting, so it can only add information. Returns
+    one stats dict per source for the summary/log.
+
+    Every region gets every column (zero/NA when there is no hit), so the output
+    table has a stable schema regardless of what happened to overlap.
+    """
+    if not indexes:
+        return []
+
+    region_chroms = {c.chrom for c in regions}
+    stats: List[dict] = []
+
+    for idx in indexes:
+        check_chrom_compatibility(idx, region_chroms)
+        n_with_overlap = 0
+        for c in regions:
+            result = annotate_region(
+                idx, c.chrom, c.start, c.end, c.strand, cfg.annotate_nearest_window
+            )
+            c.annotations.update(result.columns)
+            c.overlay_types[idx.label] = result.type_counts
+            if result.type_counts:
+                n_with_overlap += 1
+
+        stats.append(
+            {
+                "label": idx.label,
+                "path": idx.path,
+                "n_features_loaded": idx.n_features,
+                "n_features_skipped": idx.n_skipped,
+                "n_chromosomes": len(idx.chroms),
+                "feature_types": dict(sorted(idx.type_counts.items())),
+                "covered_bp_by_type": idx.covered_bp_by_type,
+                "n_regions_with_overlap": n_with_overlap,
+                "n_regions_total": len(regions),
+                "stranded_matching": idx.stranded,
+            }
+        )
+    return stats
+
+
+def overlay_labels_of(indexes: List[OverlayIndex]) -> List[str]:
+    return [idx.label for idx in indexes]
+
+
+def apply_annotation_names(
+    regions: List[ConsensusRegion], labels: List[str], enabled: bool = True
+) -> int:
+    """Append the overlapping feature type to each consensus transcript name.
+
+    ``consensus_transcript_7`` becomes ``consensus_transcript_7-enhancer``, so the
+    GTF and every downstream count table say what the locus sits on without a
+    lookup. Regions overlapping nothing keep their bare name.
+
+    The suffix is a suffix on purpose: the ``consensus_transcript_N`` prefix stays
+    intact, so IDs remain grouped by number and anything matching
+    ``^consensus_transcript_`` keeps working. Base names are already unique, so
+    appending cannot collide. Returns the number of names decorated.
+    """
+    if not enabled or not labels:
+        return 0
+    n = 0
+    for c in regions:
+        if not c.consensus_transcript_name:
+            continue
+        token = annotation_name_token(c.overlay_types, labels)
+        if token:
+            c.consensus_transcript_name = f"{c.consensus_transcript_name}-{token}"
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
 # Writers
 # --------------------------------------------------------------------------- #
 
-def consensus_to_dataframe(regions: List[ConsensusRegion]) -> pl.DataFrame:
+def consensus_to_dataframe(
+    regions: List[ConsensusRegion],
+    overlay_labels: Optional[List[str]] = None,
+) -> pl.DataFrame:
+    """Flatten consensus regions into the output table.
+
+    ``overlay_labels`` names the external-annotation sources so their columns are
+    emitted (in order, after the core columns) even when no region overlapped
+    anything — otherwise a zero-hit run would silently lose the columns.
+    """
+    overlay_cols: List[str] = []
+    for label in overlay_labels or []:
+        overlay_cols.extend(overlay_columns(label))
+
     rows = []
     for c in regions:
         rows.append(
@@ -377,6 +500,9 @@ def consensus_to_dataframe(regions: List[ConsensusRegion]) -> pl.DataFrame:
                 "in_consensus_gtf": "yes" if c.in_consensus_gtf else "no",
                 "consensus_transcript_name": c.consensus_transcript_name or "NA",
                 "member_region_ids": ";".join(c.member_region_ids),
+                # Overlay columns last; missing keys are filled below so every
+                # row carries the same schema.
+                **{k: c.annotations.get(k) for k in overlay_cols},
             }
         )
     schema_hint = rows if rows else [{
@@ -388,6 +514,7 @@ def consensus_to_dataframe(regions: List[ConsensusRegion]) -> pl.DataFrame:
         "mean_profile_correlation": None, "mean_avg_depth": None,
         "passes_min_samples": None, "in_consensus_gtf": None,
         "consensus_transcript_name": None, "member_region_ids": None,
+        **{k: None for k in overlay_cols},
     }]
     df = pl.DataFrame(schema_hint)
     if not rows:
@@ -413,6 +540,11 @@ def _consensus_gtf_lines(c: ConsensusRegion) -> List[str]:
         "samples": ",".join(c.samples),
         "member_region_ids": ";".join(c.member_region_ids),
     }
+    # Carry overlapping external-annotation types so the analysis-ready GTF is
+    # self-documenting (only for sources that actually hit this locus).
+    for key, value in c.annotations.items():
+        if key.endswith("_types") and value not in (None, "NA", ""):
+            common[key] = str(value).replace('"', "")
     tx = _gtf_attr(common)
     exon = _gtf_attr({**common, "exon_number": "1"})
     return [
@@ -459,8 +591,42 @@ def write_reference_plus_consensus(
     return len(kept)
 
 
+def annotation_crosstab(
+    regions: List[ConsensusRegion], labels: List[str]
+) -> Dict[str, dict]:
+    """Cross-tabulate consensus class against external feature type.
+
+    This is the headline number for the overlay: of the reproducible novel loci,
+    how many sit on an enhancer / promoter / CTCF site. Reported per source.
+    """
+    out: Dict[str, dict] = {}
+    for label in labels:
+        per_class: Dict[str, Dict[str, int]] = {}
+        n_any = 0
+        for c in regions:
+            counts = c.overlay_types.get(label) or {}
+            bucket = per_class.setdefault(c.consensus_class, {})
+            bucket["n_regions"] = bucket.get("n_regions", 0) + 1
+            if not counts:
+                continue
+            n_any += 1
+            bucket["n_with_overlap"] = bucket.get("n_with_overlap", 0) + 1
+            for ftype in counts:
+                bucket[ftype] = bucket.get(ftype, 0) + 1
+        out[label] = {
+            "n_regions_with_overlap": n_any,
+            "by_consensus_class": {k: dict(sorted(v.items())) for k, v in
+                                   sorted(per_class.items())},
+        }
+    return out
+
+
 def write_consensus_summary(
-    cfg: ConsensusConfig, regions: List[ConsensusRegion], path: str
+    cfg: ConsensusConfig,
+    regions: List[ConsensusRegion],
+    path: str,
+    annotation_stats: Optional[List[dict]] = None,
+    overlay_labels: Optional[List[str]] = None,
 ) -> dict:
     def count(cls):
         return sum(1 for c in regions if c.consensus_class == cls and c.passes_min_samples)
@@ -476,6 +642,11 @@ def write_consensus_summary(
             "strand_aware": cfg.strand_aware,
             "include_bidirectional": cfg.include_bidirectional,
             "reference_gtf": cfg.reference_gtf,
+            "annotate": cfg.annotate,
+            "annotate_feature_types": cfg.annotate_feature_types,
+            "annotate_nearest_window": cfg.annotate_nearest_window,
+            "annotate_stranded": cfg.annotate_stranded,
+            "annotate_names": cfg.annotate_names,
         },
         "n_clusters_total": len(regions),
         "n_clusters_passing_min_samples": len(passing),
@@ -485,6 +656,16 @@ def write_consensus_summary(
         "n_recurrent_multimapper_artifact": count(CONS_MULTI),
         "n_written_to_consensus_gtf": sum(1 for c in regions if c.in_consensus_gtf),
     }
+    if annotation_stats:
+        # Cross-tab over PASSING regions only: the reproducible loci are what the
+        # overlay is meant to interpret. Comparing the novel row against the
+        # gDNA / multimapper rows is the built-in control — all classes went
+        # through identical masking and discovery, so a difference between them
+        # is informative in a way that a raw overlap count is not.
+        summary["annotation"] = {
+            "sources": annotation_stats,
+            "crosstab_passing": annotation_crosstab(passing, overlay_labels or []),
+        }
     with open(path, "w") as fh:
         json.dump(summary, fh, indent=2, default=str)
     return summary
@@ -501,6 +682,45 @@ def run(cfg: ConsensusConfig) -> dict:
     logger.info("Loaded %d candidate rows from %d samples.", df.height, len(cfg.tsvs))
 
     regions = build_consensus(df, cfg)
+
+    # External annotation overlay: strictly additive, applied after voting.
+    indexes: List[OverlayIndex] = []
+    annotation_stats: List[dict] = []
+    if cfg.annotate:
+        indexes = load_sources(
+            cfg.annotate,
+            labels=cfg.annotate_labels,
+            feature_types=cfg.annotate_feature_types,
+            stranded=cfg.annotate_stranded,
+        )
+        for idx in indexes:
+            logger.info(
+                "Annotation source %r: %d features across %d chromosomes (%s).",
+                idx.label, idx.n_features, len(idx.chroms),
+                ", ".join(f"{t}={n}" for t, n in sorted(idx.type_counts.items()))
+                or "no types",
+            )
+        annotation_stats = annotate_consensus(regions, indexes, cfg)
+        for st in annotation_stats:
+            logger.info(
+                "Annotation %r: %d/%d consensus regions overlap a feature.",
+                st["label"], st["n_regions_with_overlap"], st["n_regions_total"],
+            )
+
+    labels = overlay_labels_of(indexes)
+
+    # Names must be decorated BEFORE anything is written: the table, the
+    # consensus GTF and the reference+consensus GTF all read the same field.
+    n_named = apply_annotation_names(regions, labels, enabled=cfg.annotate_names)
+    if n_named:
+        logger.info(
+            "Named %d consensus transcripts after their overlapping feature type "
+            "(e.g. %s).",
+            n_named,
+            next(c.consensus_transcript_name for c in regions
+                 if c.consensus_transcript_name and "-" in c.consensus_transcript_name),
+        )
+
     passing = [c for c in regions if c.passes_min_samples]
 
     table = f"{cfg.out_prefix}.consensus_regions.tsv"
@@ -509,7 +729,9 @@ def run(cfg: ConsensusConfig) -> dict:
 
     # Write only the passing clusters to the main table (that IS the filter),
     # keeping every consensus class so recurrent gDNA/artifacts are visible.
-    consensus_to_dataframe(passing).write_csv(table, separator="\t")
+    consensus_to_dataframe(passing, overlay_labels=labels).write_csv(
+        table, separator="\t"
+    )
     n_gtf = write_consensus_gtf(regions, gtf)
 
     # Analysis-ready GTF (reference + consensus) for featureCounts on the
@@ -519,7 +741,26 @@ def run(cfg: ConsensusConfig) -> dict:
         write_reference_plus_consensus(cfg.reference_gtf, regions, merged)
         logger.info("Wrote analysis-ready GTF (reference + consensus): %s", merged)
 
-    summary = write_consensus_summary(cfg, regions, summ)
+    summary = write_consensus_summary(
+        cfg, regions, summ,
+        annotation_stats=annotation_stats, overlay_labels=labels,
+    )
+
+    # Overlap rates per consensus class. All classes passed through identical
+    # masking and discovery, so novel-vs-gDNA is the interpretable contrast.
+    for label, block in (summary.get("annotation", {}).get("crosstab_passing", {})).items():
+        for cls, counts in block["by_consensus_class"].items():
+            n_tot = counts.get("n_regions", 0)
+            n_hit = counts.get("n_with_overlap", 0)
+            logger.info(
+                "Annotation %r | %s: %d/%d overlap (%.1f%%)%s",
+                label, cls, n_hit, n_tot,
+                100.0 * n_hit / n_tot if n_tot else 0.0,
+                " | " + ", ".join(
+                    f"{k}={v}" for k, v in counts.items()
+                    if k not in ("n_regions", "n_with_overlap")
+                ) if n_hit else "",
+            )
 
     logger.info(
         "Consensus: %d clusters, %d reproducible (>=%d samples) | "

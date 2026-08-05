@@ -114,6 +114,124 @@ def test_stranded_masking_discovers_antisense_over_exon(tmp_path):
     assert c.label == LIKELY_NOVEL
 
 
+def _intronic_antisense_fixture(tmp_path, intronic_sense_depth):
+    """Host mRNA on '+' with an intron; an eRNA on '-' inside that intron.
+
+    Exons [1000,2000) and [8000,9000), intron between them, and a '-' strand
+    eRNA at [4000,4600) sitting on a (strandless) enhancer inside the intron.
+    ``intronic_sense_depth`` is the host's pre-mRNA / retained-intron coverage,
+    which is what competes with the eRNA for the candidate interval.
+    """
+    from gdna_rescue.gtf_io import parse_gtf
+
+    gtf = tmp_path / f"host_{intronic_sense_depth}.gtf"
+    gtf.write_text(
+        'chr1\tsim\tgene\t1001\t9000\t.\t+\t.\tgene_id "HOST"; gene_name "HOST";\n'
+        'chr1\tsim\ttranscript\t1001\t9000\t.\t+\t.\tgene_id "HOST"; transcript_id "H1";\n'
+        'chr1\tsim\texon\t1001\t2000\t.\t+\t.\tgene_id "HOST"; transcript_id "H1";\n'
+        'chr1\tsim\texon\t8001\t9000\t.\t+\t.\tgene_id "HOST"; transcript_id "H1";\n'
+    )
+    n = 20000
+    plus = np.zeros(n, dtype=np.int32)
+    minus = np.zeros(n, dtype=np.int32)
+    plus[1000:2000] = 50
+    plus[8000:9000] = 50
+    plus[2000:8000] = intronic_sense_depth
+    minus[4000:4600] = 30                     # the antisense eRNA
+    return str(gtf), plus, minus, np.zeros(n, dtype=np.int32)
+
+
+def test_intronic_antisense_erna_is_isolated_in_gene_mode(tmp_path):
+    """An eRNA antisense to its host mRNA, inside an intron, on an enhancer.
+
+    In ``gene`` mode with stranded masking the host's whole span is masked on '+'
+    only, so the competing sense signal is removed and the eRNA stands alone as a
+    clean single-strand antisense candidate -- regardless of how strong the host's
+    intronic coverage is.
+    """
+    from gdna_rescue.gtf_io import parse_gtf
+    from gdna_rescue.discovery import build_candidates_for_chrom, CTX_ANTISENSE
+    from gdna_rescue.classify import LIKELY_NOVEL
+
+    for intronic in (4, 12):
+        gtf, plus, minus, multi = _intronic_antisense_fixture(tmp_path, intronic)
+        ann = parse_gtf(gtf, "gene")
+        cands = build_candidates_for_chrom(
+            "chr1", plus, minus, multi, ann, Config(annotation_mode="gene"),
+            stranded_masking=True,
+        )
+        over = [c for c in cands if c.start < 4600 and c.end > 4000]
+        assert len(over) == 1
+        c = over[0]
+        assert (c.start, c.end) == (4000, 4600)        # exactly the eRNA
+        assert c.metrics.dominant_strand == "-"
+        assert c.metrics.dominant_strand_fraction == 1.0
+        assert c.context_label == CTX_ANTISENSE
+        assert c.label == LIKELY_NOVEL and c.kept
+
+
+def test_intronic_antisense_erna_is_swallowed_by_intron_in_exon_mode(tmp_path):
+    """In ``exon`` mode a well-covered intron outcompetes the antisense eRNA.
+
+    Only exons are masked, so the host's intronic pre-mRNA stays in the coverage.
+    Once it clears min_depth the whole intron becomes ONE '+'-dominant candidate
+    that merely contains the eRNA, so the antisense locus is no longer resolvable
+    on its own. This is why gene-mode masking is the better choice when intronic
+    antisense transcription is the target.
+    """
+    from gdna_rescue.gtf_io import parse_gtf
+    from gdna_rescue.discovery import build_candidates_for_chrom, CTX_ANTISENSE
+
+    # Low intronic signal: the eRNA is still resolved on its own.
+    gtf, plus, minus, multi = _intronic_antisense_fixture(tmp_path, 4)
+    ann = parse_gtf(gtf, "exon")
+    quiet = build_candidates_for_chrom(
+        "chr1", plus, minus, multi, ann, Config(), stranded_masking=True
+    )
+    over = [c for c in quiet if c.start < 4600 and c.end > 4000]
+    assert len(over) == 1
+    assert (over[0].start, over[0].end) == (4000, 4600)
+    assert over[0].context_label == CTX_ANTISENSE
+
+    # Higher intronic signal: the candidate becomes the whole intron, on '+'.
+    gtf, plus, minus, multi = _intronic_antisense_fixture(tmp_path, 12)
+    ann = parse_gtf(gtf, "exon")
+    busy = build_candidates_for_chrom(
+        "chr1", plus, minus, multi, ann, Config(), stranded_masking=True
+    )
+    over = [c for c in busy if c.start < 4600 and c.end > 4000]
+    assert len(over) == 1
+    c = over[0]
+    assert (c.start, c.end) == (2000, 8000)            # the entire intron
+    assert c.metrics.dominant_strand == "+"            # host sense, not the eRNA
+    assert c.context_label != CTX_ANTISENSE
+
+
+def test_strandless_enhancer_attaches_to_an_antisense_region(tmp_path):
+    """A strandless Ensembl enhancer must annotate the region on either strand.
+
+    Also holds under --annotate-stranded: strand filtering only applies when BOTH
+    the region and the feature are stranded, and regulatory features are '.'.
+    """
+    from gdna_rescue.overlay import (
+        annotate_region, annotation_name_token, parse_overlay,
+    )
+
+    gff = tmp_path / "enh.gff3"
+    gff.write_text(
+        "chr1\tEnsembl\tenhancer\t4001\t4600\t.\t.\t.\tID=ENSR_TEST;color=#faca00\n"
+    )
+    for stranded in (False, True):
+        idx = parse_overlay(str(gff), label="regulatory", stranded=stranded)
+        res = annotate_region(idx, "chr1", 4000, 4600, "-", 10000)
+        assert res.columns["regulatory_n"] == 1
+        assert res.columns["regulatory_types"] == "enhancer:1"
+        assert res.columns["regulatory_ids"] == "ENSR_TEST"
+        assert annotation_name_token(
+            {"regulatory": res.type_counts}, ["regulatory"]
+        ) == "enhancer"
+
+
 def test_low_covered_fraction_filtered():
     cfg = Config(min_depth=3, max_gap=0, min_region_length=100,
                  min_covered_fraction=0.9, min_covered_bases=0)

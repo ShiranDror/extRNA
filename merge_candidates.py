@@ -54,6 +54,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-bidirectional", action="store_true",
                    help="Also write reproducible bidirectional loci to the "
                         "consensus GTF (default: novel only).")
+
+    ann = p.add_argument_group(
+        "external annotation overlay",
+        "Annotate the consensus coordinates with overlapping features from "
+        "external GFF3/GFF/GTF files (e.g. the Ensembl Regulatory Build). "
+        "Purely additive: adds columns to the consensus table and attributes to "
+        "the GTF, and never changes a classification.",
+    )
+    ann.add_argument("--annotate", nargs="+", default=[], metavar="[LABEL=]FILE",
+                     help="Annotation file(s), GFF3/GFF/GTF, optionally gzipped. "
+                          "Prefix with 'label=' to set the output column prefix, "
+                          "otherwise it is derived from the filename.")
+    ann.add_argument("--annotate-labels", nargs="+", default=None,
+                     help="Explicit column prefixes matching --annotate order.")
+    ann.add_argument("--annotate-feature-types", nargs="+", default=None,
+                     metavar="TYPE",
+                     help="Keep only these column-3 feature types, e.g. "
+                          "enhancer promoter CTCF_binding_site "
+                          "open_chromatin_region (default: all types).")
+    ann.add_argument("--annotate-nearest-window", type=int, default=10000,
+                     help="When a region overlaps nothing, report the nearest "
+                          "feature within this many bp (0 disables).")
+    ann.add_argument("--no-annotate-names", dest="annotate_names",
+                     action="store_false",
+                     help="Do NOT append the overlapping feature type to "
+                          "consensus transcript names. By default a locus on an "
+                          "enhancer is named consensus_transcript_7-enhancer, so "
+                          "the GTF and downstream count tables are "
+                          "self-describing. Disable to keep bare IDs comparable "
+                          "with an earlier un-annotated run.")
+    ann.add_argument("--annotate-stranded", action="store_true",
+                     help="Require the feature strand to match the region's "
+                          "strand. Off by default: Ensembl regulatory features "
+                          "are mostly strandless, and CTCF strand is motif "
+                          "orientation, not transcription. Use for sources where "
+                          "strand does mean transcription (e.g. CAGE peaks).")
+
     p.add_argument("--verbose", action="store_true")
     return p
 
@@ -69,6 +106,12 @@ def main(argv=None) -> int:
         strand_aware=args.strand_aware,
         include_bidirectional=args.include_bidirectional,
         reference_gtf=args.reference_gtf,
+        annotate=args.annotate,
+        annotate_labels=args.annotate_labels,
+        annotate_feature_types=args.annotate_feature_types,
+        annotate_nearest_window=args.annotate_nearest_window,
+        annotate_stranded=args.annotate_stranded,
+        annotate_names=args.annotate_names,
         verbose=args.verbose,
     )
     logger = get_logger(cfg.verbose)

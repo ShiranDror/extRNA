@@ -12,6 +12,9 @@ without pysam (which has no Windows wheels):
     strandedness - automatic library-strandedness inference
     writers      - TSV / GTF / JSON / BED / bedGraph output
     pipeline     - end-to-end orchestration
+    crosssample  - cross-sample consensus / reproducibility filter (polars)
+    overlay      - external annotation overlay for consensus regions (stdlib)
+    fasta        - genome-FASTA reader + novel-transcript sequence extraction
     cli          - argument parsing / entry point
 """
 

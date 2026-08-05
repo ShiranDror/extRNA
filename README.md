@@ -109,7 +109,7 @@ for Linux) or conda inside WSL. The pure-analysis modules and the unit tests
 
 ```powershell
 pip install numpy pandas scipy pytest
-python -m pytest -q          # 22 pysam-free tests run; integration tests skip
+python -m pytest -q          # 78 pysam-free tests run; integration tests skip
 ```
 
 ---
@@ -214,6 +214,22 @@ annotated on either strand is masked on both), and `--no-stranded-masking`
 forces positional masking for any library. Under positional masking, antisense
 over an annotated feature is not recovered — only antisense that does not overlap
 a masked feature (e.g. intronic-antisense in `exon` mode, or intergenic).
+
+> **Chasing intronic antisense transcription (e.g. an eRNA on an intronic
+> enhancer)? Use `--annotation-mode gene`, not the default `exon`.**
+> This is counter-intuitive, because `exon` mode masks *less*. But in `exon` mode
+> the host gene's intronic pre-mRNA coverage stays in the data, and as soon as it
+> clears `--min-depth` the **whole intron becomes one `+`-dominant candidate** that
+> merely *contains* the antisense locus — so the antisense feature is no longer
+> resolvable on its own, and its `context_label` comes back `intronic` rather than
+> `antisense_to_gene`. In `gene` mode with stranded masking the host span is
+> masked on its own strand only, which removes the competing sense signal and
+> leaves the antisense locus as a clean single-strand candidate
+> (dominant-strand fraction 1.0) at exactly its own coordinates, whatever the
+> host's intronic depth. Both behaviours are pinned in
+> `tests/test_discovery.py`. Note this only holds with stranded masking:
+> `gene` mode plus `--no-stranded-masking` masks the intron on both strands and
+> the locus is lost entirely.
 
 ### MultiQC integration
 
@@ -417,15 +433,23 @@ GTF by default.
 --reference-gtf reference.gtf # if given, also write the analysis-ready reference+consensus GTF
 --ignore-strand               # match regardless of strand (default: strand-aware)
 --include-bidirectional       # also add reproducible bidirectional loci to the GTF
+
+# external annotation overlay (see below)
+--annotate [LABEL=]FILE ...   # GFF3/GFF/GTF sources to annotate consensus coordinates with
+--annotate-labels reg ...      # explicit column prefixes matching --annotate order
+--annotate-feature-types enhancer promoter ...   # keep only these column-3 types
+--annotate-nearest-window 10000                  # report nearest feature when nothing overlaps
+--annotate-stranded           # require feature strand to match (default: strand-agnostic)
+--no-annotate-names           # keep bare consensus_transcript_N IDs (default: add the type suffix)
 ```
 
 ### Outputs (`--out-prefix cohort`)
 | File | Contents |
 |------|----------|
-| `cohort.consensus_regions.tsv` | Reproducible clusters: consensus class, n_samples, per-sample classes, union coordinates, mean metrics, provenance |
-| `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` (union span; carries `n_samples`, `samples`, `member_region_ids`) |
+| `cohort.consensus_regions.tsv` | Reproducible clusters: consensus class, n_samples, per-sample classes, union coordinates, mean metrics, provenance, **+ external-annotation columns** |
+| `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` — **`consensus_transcript_N-<feature_type>` when annotated** (union span; carries `n_samples`, `samples`, `member_region_ids`, `<label>_types`) |
 | `cohort.reference_plus_consensus.gtf` | **(with `--reference-gtf`)** reference + consensus — the analysis-ready GTF for featureCounts on the original STAR BAMs |
-| `cohort.consensus_summary.json` | Parameters and counts per consensus class |
+| `cohort.consensus_summary.json` | Parameters and counts per consensus class, **+ the annotation cross-tab** |
 
 Consensus coordinates use the **union span** of the clustered members.
 
@@ -433,6 +457,152 @@ Consensus coordinates use the **union span** of the clustered members.
 > biology (e.g. a transcript induced in a single condition). It is the right
 > tool for finding *robust* novel transcripts, not a complete catalogue, and it
 > assumes consistent chromosome naming across samples.
+
+---
+
+## Annotating consensus coordinates with external data
+
+The consensus step produces a list of reproducible coordinates. Those
+coordinates often fall on features that are already known — regulatory elements,
+repeats, CAGE TSS peaks — and knowing that **upfront, in the consensus table**,
+is far more useful than discovering it later in a browser.
+
+`--annotate` takes one or more GFF3 / GFF / GTF files (optionally gzipped) and
+attaches overlap information to every consensus region:
+
+```bash
+# Ensembl Regulatory Build (release 116, GRCh38):
+#   https://ftp.ensembl.org/pub/release-116/regulation/homo_sapiens/GRCh38/annotation/
+python merge_candidates.py \
+  --tsv A.candidate_regions.tsv B.candidate_regions.tsv C.candidate_regions.tsv \
+  --reference-gtf reference.gtf \
+  --out-prefix cohort --min-samples 2 \
+  --annotate regulatory=Homo_sapiens.GRCh38.regulatory_features.v116.gff3.gz \
+             emar=Homo_sapiens.GRCh38.EMARs.v116.gff.gz
+```
+
+Each source contributes eight columns, prefixed with its label:
+
+| Column | Contents |
+|---|---|
+| `<label>_n` | number of overlapping features |
+| `<label>_types` | overlapping feature types with counts, e.g. `CTCF_binding_site:1,enhancer:1` |
+| `<label>_ids` | feature IDs, e.g. `ENSR1_B33F;ENSR1_538P5` (capped at 10, then `+N_more`) |
+| `<label>_overlap_bp` | bases of the region covered by any feature (union, not sum) |
+| `<label>_overlap_frac` | that as a fraction of region length |
+| `<label>_genes` | linked gene names — Ensembl **promoters** carry `gene_id`/`gene_name` |
+| `<label>_nearest` | nearest feature when nothing overlaps, `type:id` |
+| `<label>_nearest_distance` | gap in bp; `0` when overlapping, `-1` when nothing is in the window |
+
+The label defaults to a short name derived from the filename (the Ensembl
+`...regulatory_features.v116.gff3.gz` becomes `regulatory`); use `label=path` or
+`--annotate-labels` to set it explicitly. Overlapping types are also written into
+the consensus GTF as a `<label>_types` attribute, so the analysis-ready
+annotation is self-documenting.
+
+### Transcript names carry the annotation
+
+When a consensus locus overlaps a feature, its transcript name gains that
+feature type as a **suffix**, so the GTF — and every downstream featureCounts /
+DE table built from it — says what the locus sits on without a lookup:
+
+```
+consensus_transcript_2-enhancer
+consensus_transcript_9-promoter
+consensus_transcript_1-CTCF_binding_site
+consensus_transcript_17                     <- overlaps nothing, bare name kept
+```
+
+`gene_id` follows (`consensus_transcript_2-enhancer_gene`). Design points:
+
+- **Suffix, not prefix**, so the `consensus_transcript_N` stem survives: IDs stay
+  grouped by number and anything matching `^consensus_transcript_` keeps working.
+  Base names are already unique, so appending can never collide.
+- **The token is the first type in the `<label>_types` column** — i.e. the
+  alphabetically-first overlapping type of the first `--annotate` source that
+  hits. There is deliberately **no built-in list of feature types and no priority
+  table**, so a new annotation source needs no code change. Source precedence is
+  the order you pass `--annotate` in.
+- Consequence worth knowing: alphabetical order means `CTCF_binding_site` beats
+  `enhancer`, `open_chromatin_region` and `promoter` on loci that overlap several.
+  If you would rather the names reflect the transcription-relevant elements, drop
+  CTCF from consideration with
+  `--annotate-feature-types enhancer promoter open_chromatin_region`.
+- `--no-annotate-names` keeps bare IDs — use it when you need identifiers
+  comparable with an earlier un-annotated run, since renaming changes the row
+  labels of any count matrix built from the GTF.
+
+### It annotates; it does not classify
+
+The overlay runs **after** clustering and the class vote, and it can only add
+columns — it never changes a call. That is deliberate:
+
+- The classifier stays coverage-only and auditable. Every call remains explained
+  by `reason_for_classification` alone.
+- It keeps the annotation **independent of the calls**. "Our novel transcripts
+  are enriched at enhancers" is only a finding if enhancer annotation was not an
+  input to the calls; if it were, the enrichment would be guaranteed by
+  construction and would mean nothing.
+
+### Reading the numbers honestly
+
+`consensus_summary.json` gains an `annotation` block with a **cross-tab of
+consensus class against feature type**, plus each source's genomic footprint:
+
+```json
+"crosstab_passing": {
+  "regulatory": {
+    "by_consensus_class": {
+      "reproducible_novel": { "n_regions": 24, "n_with_overlap": 24,
+                              "enhancer": 12, "promoter": 7,
+                              "CTCF_binding_site": 15, "open_chromatin_region": 7 },
+      "recurrent_gDNA":     { "n_regions": 10 }
+    }
+  }
+}
+```
+
+**A raw overlap count is not interpretable on its own.** The Ensembl Regulatory
+Build is large: 237k enhancers covering ~121 Mb, i.e. roughly 4% of the genome
+before you even account for candidate length. A meaningful fraction of *any*
+interval set will touch an enhancer by chance.
+
+Two things make it interpretable:
+
+- **The cross-class contrast** (the built-in control). Every consensus class went
+  through identical masking, discovery and clustering, so the difference between
+  the `reproducible_novel` row and the `recurrent_gDNA` /
+  `recurrent_multimapper_artifact` rows is informative in a way that either row
+  alone is not.
+- **`covered_bp_by_type`** in the summary, which is each feature type's union
+  footprint — the input you need to build a proper null.
+
+Note that a genome-wide uniform null would be *wrong* here: candidates are not
+drawn uniformly from the genome. Annotated RNA was masked out upstream and
+candidates only exist where there was continuous coverage, so the eligible
+territory is a specific, non-random subset. A length- and context-matched shuffle
+within the unmasked, covered genome is the right null if you need a p-value;
+the cross-class contrast is the honest quick read.
+
+### Notes
+
+- **Strand-agnostic by default.** Ensembl regulatory features are mostly
+  strandless (`.`), and where a strand exists (`CTCF_binding_site`) it denotes
+  motif orientation, not transcription — so requiring a strand match would drop
+  real hits. Use `--annotate-stranded` for sources where strand *does* mean
+  transcription (e.g. CAGE TSS peaks).
+- **Chromosome naming is normalised** (`chr1`↔`1`, `chrM`↔`MT`), so an
+  Ensembl regulation file works against a UCSC-named cohort. If **no** name could
+  ever match, the run **fails with an error** rather than writing a table of `NA`
+  — a silent zero-overlap result looks exactly like a genuine "nothing is
+  regulatory" answer, which is the worst possible outcome.
+- **The overlay is not restricted to regulatory data.** Any GFF3/GTF works —
+  repeat annotation, CAGE peaks, or a lncRNA catalogue that is *not* in the GTF
+  you masked with (a candidate reproducing a known lncRNA is not novel, it is
+  annotated in a database you did not use).
+- Pure standard library (`bisect` + `gzip`) — no pysam, no numpy, so it runs
+  natively anywhere the merge step runs. The full 365k-feature Ensembl file loads
+  in a few seconds.
 
 ---
 
@@ -472,6 +642,8 @@ FastQC / fastp (trim)
   -> extRNA  detect_gdna_vs_novel.py   (per sample)
   -> extRNA  merge_candidates.py --reference-gtf reference.gtf   (cohort consensus)
        => cohort.reference_plus_consensus.gtf
+       (optional: --annotate regulatory=Homo_sapiens.GRCh38.regulatory_features.v116.gff3.gz
+        => enhancer / promoter / CTCF overlap per consensus locus, in the table)
        (optional: extract_novel_fasta.py --gtf cohort.consensus_transcripts.gtf
         => cohort.novel.fa for BLAST/ORF/annotation of the rescued transcripts)
   -> featureCounts  (ORIGINAL STAR BAMs, matched strandedness)
@@ -491,6 +663,9 @@ Points that matter for correct results:
   each sample's `unknown_transcript_N` differ; `merge_candidates.py` collapses
   them to reproducible `consensus_transcript_N` with IDs consistent across
   samples. Use `--reference-gtf` to get the single analysis-ready GTF directly.
+  With `--annotate`, those IDs also carry the overlapping feature type
+  (`consensus_transcript_7-enhancer`), so the count matrix is self-describing —
+  but decide on annotation *before* quantifying, since the IDs are the row labels.
 - **Match strandedness across tools.** Use extRNA's inferred strandedness (from
   `summary.json`) for featureCounts `-s` (`-s 1` forward, `-s 2` reverse). This
   is critical for the antisense/intronic novel features — a wrong `-s` miscounts
@@ -565,6 +740,12 @@ integration test asserts they are classified and rescued as expected.
 - Blacklist of problematic genomic regions (e.g. ENCODE blacklist) to pre-filter
   candidates.
 - Pluggable statistical classifier behind `classify_region`.
+- Per-epigenome regulatory activity in the overlay: Ensembl ships
+  `regulatory_activity.v116.tsv.gz` (ACTIVE/INACTIVE per cell type, keyed by the
+  same `ENSR…` IDs the overlay already reports). "Enhancer active in a tissue
+  matching the sample" is a much stronger eRNA story than bare enhancer overlap.
+- Length- and context-matched interval shuffling within the unmasked, covered
+  genome, to turn the annotation cross-tab into a real enrichment statistic.
 
 ---
 
@@ -585,6 +766,7 @@ gdna_rescue/
   writers.py       # TSV / GTF / JSON / BED / bedGraph
   pipeline.py      # orchestration (chromosome-wise, optional multiprocessing)
   crosssample.py   # cross-sample consensus / reproducibility filter (polars only)
+  overlay.py       # external annotation overlay for consensus regions (stdlib only)
   fasta.py         # genome-FASTA reader + novel-transcript sequence extraction
   cli.py           # argument parsing
 tests/
@@ -593,6 +775,7 @@ tests/
   test_discovery.py       # discovery/merging unit tests
   test_strandedness.py    # read -> strand mapping unit tests
   test_crosssample.py     # cross-sample consensus unit tests (polars)
+  test_overlay.py         # external annotation overlay unit tests (stdlib)
   test_qc.py              # gDNA QC + read-assignment + MultiQC writer tests
   test_fasta.py           # FASTA reader + novel-transcript extraction tests
   test_pipeline.py        # end-to-end integration (needs pysam)
