@@ -535,10 +535,14 @@ def _gtf_attr(d: Dict[str, str]) -> str:
 def annotation_gtf_attributes(c: ConsensusRegion) -> Dict[str, str]:
     """External-annotation fields to emit as GTF attributes for one region.
 
-    For a source that hits this locus, all of its fields are carried so the GTF is
-    self-contained. For a source that does not, only the nearest-feature fields
-    are carried (and only if something was found) — emitting ``_n "0"`` and
-    ``_overlap_bp "0"`` on every miss would be pure noise.
+    **Only actual overlaps are emitted.** Nearest-feature proximity is
+    deliberately excluded: a feature 10 kb away is not a property of this
+    transcript, and written onto a GTF feature record it reads as though it were
+    one. Proximity stays in ``consensus_regions.tsv`` (``<label>_nearest`` /
+    ``<label>_nearest_distance``), where it is plainly a report column.
+
+    A region that overlaps nothing therefore gets no annotation attributes at all
+    — no ``_n "0"`` noise, and nothing that could be mistaken for an assignment.
 
     Note featureCounts does NOT propagate GTF attributes: its output is keyed by
     the ``-g`` attribute (default ``gene_id``) and drops the rest. These
@@ -550,20 +554,14 @@ def annotation_gtf_attributes(c: ConsensusRegion) -> Dict[str, str]:
 
     out: Dict[str, str] = {}
     for label in labels:
-        overlaps = bool(c.annotations.get(f"{label}_n"))
+        if not c.annotations.get(f"{label}_n"):
+            continue                      # no overlap -> nothing goes on the GTF
         for col in overlay_columns(label):
+            if col.endswith(("_nearest", "_nearest_distance")):
+                continue
             value = c.annotations.get(col)
             if value in (None, "NA", ""):
                 continue
-            is_nearest = col.endswith(("_nearest", "_nearest_distance"))
-            if not overlaps and not is_nearest:
-                continue
-            if is_nearest and (not overlaps) and c.annotations.get(
-                f"{label}_nearest"
-            ) in (None, "NA", ""):
-                continue
-            if overlaps and is_nearest:
-                continue        # distance is 0 by definition when overlapping
             out[col] = str(value).replace('"', "")
     return out
 

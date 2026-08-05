@@ -559,9 +559,18 @@ regulatory_ids "ENSR1_B33F;ENSR1_538P5"; regulatory_overlap_bp "590";
 regulatory_overlap_frac "0.9578";
 ```
 
-A source that does *not* hit a locus contributes only `_nearest` /
-`_nearest_distance`, and only when something was found in the window — no
-`_n "0"` noise on every miss.
+**Only real overlaps go onto the GTF.** A locus that overlaps nothing gets no
+annotation attributes at all. Nearest-feature proximity is deliberately kept out
+of the GTF: a feature 10 kb away is not a property of the transcript, and written
+onto a feature record it reads as though the locus had been *assigned* to it.
+Proximity is reported in `consensus_regions.tsv` only
+(`<label>_nearest`, `<label>_nearest_distance`), where it is plainly a lookup
+column. `--annotate-nearest-window 0` switches it off entirely.
+
+Proximity is inert in every other respect too — it never merges intervals, never
+changes coordinates, never changes a class, and never contributes the name suffix
+(that comes only from an actual overlap). Pinned in
+`tests/test_overlay.py::test_proximity_never_changes_coordinates_class_or_name`.
 
 **2. As columns in `consensus_regions.tsv`**, including a `gene_id` column
 holding the exact identifier the GTF uses.

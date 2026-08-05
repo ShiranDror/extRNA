@@ -543,7 +543,13 @@ def test_non_overlapping_region_emits_no_zero_noise(tmp_path):
     assert annotation_gtf_attributes(regions[0]) == {}
 
 
-def test_nearest_feature_is_carried_when_not_overlapping(tmp_path):
+def test_proximity_never_reaches_the_gtf(tmp_path):
+    """A nearby-but-not-overlapping feature must NOT be written onto the GTF.
+
+    A feature 1.5 kb away is not a property of this transcript. It is reported in
+    the TSV (_nearest / _nearest_distance) and nowhere else -- otherwise a GTF
+    record would read as though the locus had been assigned to that feature.
+    """
     import polars as pl
     from gdna_rescue.crosssample import annotation_gtf_attributes
 
@@ -559,11 +565,50 @@ def test_nearest_feature_is_carried_when_not_overlapping(tmp_path):
     indexes = load_sources([f"reg={_write(tmp_path, 'reg.gff3', ENSEMBL_GFF3)}"])
     annotate_consensus(regions, indexes, cfg)
 
-    attrs = annotation_gtf_attributes(regions[0])
-    assert attrs == {
-        "reg_nearest": "open_chromatin_region:ENSR1_OCR1",
-        "reg_nearest_distance": "1500",
-    }
+    # Reported in the table...
+    assert regions[0].annotations["reg_nearest"] == \
+        "open_chromatin_region:ENSR1_OCR1"
+    assert regions[0].annotations["reg_nearest_distance"] == 1500
+    # ...and absent from the GTF.
+    assert annotation_gtf_attributes(regions[0]) == {}
+
+    out = os.path.join(str(tmp_path), "near.gtf")
+    write_consensus_gtf(regions, out)
+    with open(out) as fh:
+        text = fh.read()
+    assert "ENSR1_OCR1" not in text
+    assert "nearest" not in text
+
+
+def test_proximity_never_changes_coordinates_class_or_name(tmp_path):
+    """Proximity is inert: nothing is merged, reclassified or renamed."""
+    import polars as pl
+
+    gff = tmp_path / "near.gff3"
+    gff.write_text(
+        "1\tEnsembl\tenhancer\t50001\t50600\t.\t.\t.\tID=ENSR_NEAR\n"
+    )
+    rows = [{                        # 1.4 kb away, well inside the 10 kb window
+        "region_id": "1:52000-52300", "chrom": "1", "start": 52001, "end": 52300,
+        "class": "likely_novel_transcript", "dominant_strand": "+",
+        "unique_fraction": 0.99, "dual_strand_fraction": 0.1,
+        "profile_correlation": 0.0, "avg_depth": 20.0, "sample": s,
+    } for s in ("A", "B")]
+
+    cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
+    regions = build_consensus(pl.DataFrame(rows), cfg)
+    before = (regions[0].start, regions[0].end, regions[0].consensus_class,
+              regions[0].consensus_transcript_name)
+
+    indexes = load_sources([f"reg={gff}"])
+    annotate_consensus(regions, indexes, cfg)
+    apply_annotation_names(regions, ["reg"])
+    r = regions[0]
+
+    assert (r.start, r.end, r.consensus_class, r.consensus_transcript_name) == before
+    assert r.consensus_transcript_name == "consensus_transcript_1"   # no suffix
+    assert r.annotations["reg_n"] == 0
+    assert r.annotations["reg_types"] == "NA"
 
 
 def test_gene_id_column_matches_the_gtf(tmp_path):
