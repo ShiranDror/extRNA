@@ -494,6 +494,98 @@ def test_decorated_names_stay_unique(tmp_path):
     assert all(n.endswith("-enhancer") for n in names)
 
 
+def test_all_overlay_fields_reach_the_gtf(tmp_path):
+    """The GTF must be self-contained, not just carry _types."""
+    from gdna_rescue.crosssample import annotation_gtf_attributes
+
+    cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
+    regions = build_consensus(_consensus_rows(), cfg)
+    indexes = load_sources([f"reg={_write(tmp_path, 'reg.gff3', ENSEMBL_GFF3)}"])
+    annotate_consensus(regions, indexes, cfg)
+
+    hit = [c for c in regions if c.annotations["reg_n"] > 0][0]
+    attrs = annotation_gtf_attributes(hit)
+    assert attrs["reg_n"] == "1"
+    assert attrs["reg_types"] == "enhancer:1"
+    assert attrs["reg_ids"] == "ENSR1_CZ"
+    assert attrs["reg_overlap_bp"] == "300"
+    assert attrs["reg_overlap_frac"] == "1.0"
+    # Distance is 0 by definition when overlapping -> not emitted.
+    assert "reg_nearest" not in attrs and "reg_nearest_distance" not in attrs
+
+    out = os.path.join(str(tmp_path), "g.gtf")
+    write_consensus_gtf(regions, out)
+    with open(out) as fh:
+        text = fh.read()
+    for expected in ('reg_n "1"', 'reg_types "enhancer:1"', 'reg_ids "ENSR1_CZ"',
+                     'reg_overlap_bp "300"'):
+        assert expected in text
+
+
+def test_non_overlapping_region_emits_no_zero_noise(tmp_path):
+    """A miss must not litter the GTF with _n "0" / _overlap_bp "0"."""
+    import polars as pl
+    from gdna_rescue.crosssample import annotation_gtf_attributes
+
+    rows = [{
+        "region_id": "1:700000-700300", "chrom": "1", "start": 700001,
+        "end": 700300, "class": "likely_novel_transcript",
+        "dominant_strand": "+", "unique_fraction": 0.99,
+        "dual_strand_fraction": 0.1, "profile_correlation": 0.0,
+        "avg_depth": 20.0, "sample": s,
+    } for s in ("A", "B")]
+
+    cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
+    regions = build_consensus(pl.DataFrame(rows), cfg)
+    indexes = load_sources([f"reg={_write(tmp_path, 'reg.gff3', ENSEMBL_GFF3)}"])
+    annotate_consensus(regions, indexes, cfg)
+
+    assert annotation_gtf_attributes(regions[0]) == {}
+
+
+def test_nearest_feature_is_carried_when_not_overlapping(tmp_path):
+    import polars as pl
+    from gdna_rescue.crosssample import annotation_gtf_attributes
+
+    rows = [{
+        "region_id": "1:52000-52300", "chrom": "1", "start": 52001, "end": 52300,
+        "class": "likely_novel_transcript", "dominant_strand": "+",
+        "unique_fraction": 0.99, "dual_strand_fraction": 0.1,
+        "profile_correlation": 0.0, "avg_depth": 20.0, "sample": s,
+    } for s in ("A", "B")]
+
+    cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
+    regions = build_consensus(pl.DataFrame(rows), cfg)
+    indexes = load_sources([f"reg={_write(tmp_path, 'reg.gff3', ENSEMBL_GFF3)}"])
+    annotate_consensus(regions, indexes, cfg)
+
+    attrs = annotation_gtf_attributes(regions[0])
+    assert attrs == {
+        "reg_nearest": "open_chromatin_region:ENSR1_OCR1",
+        "reg_nearest_distance": "1500",
+    }
+
+
+def test_gene_id_column_matches_the_gtf(tmp_path):
+    """consensus_regions.tsv must carry the exact featureCounts Geneid."""
+    cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
+    regions = build_consensus(_consensus_rows(), cfg)
+    indexes = load_sources([f"reg={_write(tmp_path, 'reg.gff3', ENSEMBL_GFF3)}"])
+    annotate_consensus(regions, indexes, cfg)
+    apply_annotation_names(regions, ["reg"])
+
+    df = consensus_to_dataframe(regions, overlay_labels=["reg"])
+    gene_ids = [g for g in df["gene_id"].to_list() if g != "NA"]
+    assert gene_ids == ["consensus_transcript_1-enhancer_gene"]
+
+    out = os.path.join(str(tmp_path), "g.gtf")
+    write_consensus_gtf(regions, out)
+    with open(out) as fh:
+        text = fh.read()
+    for gid in gene_ids:
+        assert f'gene_id "{gid}"' in text
+
+
 def test_decorated_name_reaches_gtf_and_table(tmp_path):
     cfg = ConsensusConfig(tsvs=["dummy"], out_prefix="c", min_samples=2)
     regions = build_consensus(_consensus_rows(), cfg)

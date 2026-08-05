@@ -446,7 +446,7 @@ GTF by default.
 ### Outputs (`--out-prefix cohort`)
 | File | Contents |
 |------|----------|
-| `cohort.consensus_regions.tsv` | Reproducible clusters: consensus class, n_samples, per-sample classes, union coordinates, mean metrics, provenance, **+ external-annotation columns** |
+| `cohort.consensus_regions.tsv` | Reproducible clusters: consensus class, n_samples, per-sample classes, union coordinates, mean metrics, provenance, `gene_id` (the featureCounts `Geneid`), **+ external-annotation columns** |
 | `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` — **`consensus_transcript_N-<feature_type>` when annotated** (union span; carries `n_samples`, `samples`, `member_region_ids`, `<label>_types`) |
 | `cohort.reference_plus_consensus.gtf` | **(with `--reference-gtf`)** reference + consensus — the analysis-ready GTF for featureCounts on the original STAR BAMs |
 | `cohort.consensus_summary.json` | Parameters and counts per consensus class, **+ the annotation cross-tab** |
@@ -544,45 +544,58 @@ columns — it never changes a call. That is deliberate:
   input to the calls; if it were, the enrichment would be guaranteed by
   construction and would mean nothing.
 
-### Reading the numbers honestly
+### Carrying the annotation into featureCounts / edgeR
 
-`consensus_summary.json` gains an `annotation` block with a **cross-tab of
-consensus class against feature type**, plus each source's genomic footprint:
+The annotation is emitted twice, because two different consumers need it in two
+different shapes.
 
-```json
-"crosstab_passing": {
-  "regulatory": {
-    "by_consensus_class": {
-      "reproducible_novel": { "n_regions": 24, "n_with_overlap": 24,
-                              "enhancer": 12, "promoter": 7,
-                              "CTCF_binding_site": 15, "open_chromatin_region": 7 },
-      "recurrent_gDNA":     { "n_regions": 10 }
-    }
-  }
-}
+**1. As GTF attributes**, on both the `transcript` and `exon` lines, so the
+analysis-ready GTF is self-contained:
+
+```
+gene_id "consensus_transcript_1-enhancer_gene"; transcript_id "consensus_transcript_1-enhancer";
+... regulatory_n "2"; regulatory_types "CTCF_binding_site:1,enhancer:1";
+regulatory_ids "ENSR1_B33F;ENSR1_538P5"; regulatory_overlap_bp "590";
+regulatory_overlap_frac "0.9578";
 ```
 
-**A raw overlap count is not interpretable on its own.** The Ensembl Regulatory
-Build is large: 237k enhancers covering ~121 Mb, i.e. roughly 4% of the genome
-before you even account for candidate length. A meaningful fraction of *any*
-interval set will touch an enhancer by chance.
+A source that does *not* hit a locus contributes only `_nearest` /
+`_nearest_distance`, and only when something was found in the window — no
+`_n "0"` noise on every miss.
 
-Two things make it interpretable:
+**2. As columns in `consensus_regions.tsv`**, including a `gene_id` column
+holding the exact identifier the GTF uses.
 
-- **The cross-class contrast** (the built-in control). Every consensus class went
-  through identical masking, discovery and clustering, so the difference between
-  the `reproducible_novel` row and the `recurrent_gDNA` /
-  `recurrent_multimapper_artifact` rows is informative in a way that either row
-  alone is not.
-- **`covered_bp_by_type`** in the summary, which is each feature type's union
-  footprint — the input you need to build a proper null.
+> **Why both:** featureCounts does **not** propagate GTF attributes. Its output
+> columns are fixed (`Geneid`, `Chr`, `Start`, `End`, `Strand`, `Length`, then one
+> column per BAM) and it aggregates by the `-g` attribute (default `gene_id`),
+> discarding the rest. So the only annotation that reaches a count matrix *by
+> itself* is whatever is baked into the ID — which is exactly why the feature type
+> is appended to the name. Everything richer has to be joined on `Geneid`.
 
-Note that a genome-wide uniform null would be *wrong* here: candidates are not
-drawn uniformly from the genome. Annotated RNA was masked out upstream and
-candidates only exist where there was continuous coverage, so the eligible
-territory is a specific, non-random subset. A length- and context-matched shuffle
-within the unmasked, covered genome is the right null if you need a p-value;
-the cross-class contrast is the honest quick read.
+That join is one line in R, because `gene_id` in the TSV is the same string
+featureCounts reports as `Geneid`:
+
+```r
+counts <- read.delim("counts.txt", comment.char = "#", row.names = 1)
+feat   <- read.delim("cohort.consensus_regions.tsv")
+
+dge <- DGEList(counts = as.matrix(counts[, -(1:5)]))
+# edgeR keeps per-feature metadata in $genes; match on the featureCounts Geneid.
+dge$genes <- feat[match(rownames(dge), feat$gene_id), ]
+
+# ...then subset or annotate results however you like, e.g.
+topTags(qlf)$table$regulatory_types
+```
+
+Reference genes from `--reference-gtf` have no row in the TSV, so they come
+through as `NA` in `$genes` — filter on `consensus_class` when you want only the
+novel features.
+
+`consensus_summary.json` also carries an `annotation` block: per-source feature
+counts and union footprint per type, plus a count of consensus class against
+feature type. That is a sanity check on the run, not an enrichment analysis —
+extRNA does no statistics on the overlap.
 
 ### Notes
 
@@ -741,11 +754,12 @@ integration test asserts they are classified and rescued as expected.
   candidates.
 - Pluggable statistical classifier behind `classify_region`.
 - Per-epigenome regulatory activity in the overlay: Ensembl ships
-  `regulatory_activity.v116.tsv.gz` (ACTIVE/INACTIVE per cell type, keyed by the
-  same `ENSR…` IDs the overlay already reports). "Enhancer active in a tissue
-  matching the sample" is a much stronger eRNA story than bare enhancer overlap.
-- Length- and context-matched interval shuffling within the unmasked, covered
-  genome, to turn the annotation cross-tab into a real enrichment statistic.
+  `regulatory_activity.v116.tsv.gz` — a matrix of ACTIVE/INACTIVE across **112
+  epigenomes**, keyed by the same `ENSR…` IDs the overlay already reports. The
+  Regulatory Build is a *union* over those 112 cell types, so `-enhancer` today
+  means "an enhancer in at least one of them"; the join would let a locus be
+  labelled active in a tissue matching the sample, and would also give each
+  element's activity breadth (constitutive vs cell-type-restricted).
 
 ---
 

@@ -499,6 +499,11 @@ def consensus_to_dataframe(
                 "passes_min_samples": "yes" if c.passes_min_samples else "no",
                 "in_consensus_gtf": "yes" if c.in_consensus_gtf else "no",
                 "consensus_transcript_name": c.consensus_transcript_name or "NA",
+                # The exact featureCounts Geneid (default -g gene_id), so the
+                # annotation columns below can be joined onto a count matrix
+                # without reconstructing the '_gene' suffix by hand.
+                "gene_id": (f"{c.consensus_transcript_name}_gene"
+                            if c.consensus_transcript_name else "NA"),
                 "member_region_ids": ";".join(c.member_region_ids),
                 # Overlay columns last; missing keys are filled below so every
                 # row carries the same schema.
@@ -513,7 +518,8 @@ def consensus_to_dataframe(
         "mean_unique_fraction": None, "mean_dual_strand_fraction": None,
         "mean_profile_correlation": None, "mean_avg_depth": None,
         "passes_min_samples": None, "in_consensus_gtf": None,
-        "consensus_transcript_name": None, "member_region_ids": None,
+        "consensus_transcript_name": None, "gene_id": None,
+        "member_region_ids": None,
         **{k: None for k in overlay_cols},
     }]
     df = pl.DataFrame(schema_hint)
@@ -524,6 +530,42 @@ def consensus_to_dataframe(
 
 def _gtf_attr(d: Dict[str, str]) -> str:
     return " ".join(f'{k} "{v}";' for k, v in d.items())
+
+
+def annotation_gtf_attributes(c: ConsensusRegion) -> Dict[str, str]:
+    """External-annotation fields to emit as GTF attributes for one region.
+
+    For a source that hits this locus, all of its fields are carried so the GTF is
+    self-contained. For a source that does not, only the nearest-feature fields
+    are carried (and only if something was found) — emitting ``_n "0"`` and
+    ``_overlap_bp "0"`` on every miss would be pure noise.
+
+    Note featureCounts does NOT propagate GTF attributes: its output is keyed by
+    the ``-g`` attribute (default ``gene_id``) and drops the rest. These
+    attributes are for anything that reads the GTF directly; to get them next to
+    counts, join ``consensus_regions.tsv`` on ``gene_id`` in R.
+    """
+    # One '_types' key per source, in --annotate order (dicts keep insertion order).
+    labels = [k[: -len("_types")] for k in c.annotations if k.endswith("_types")]
+
+    out: Dict[str, str] = {}
+    for label in labels:
+        overlaps = bool(c.annotations.get(f"{label}_n"))
+        for col in overlay_columns(label):
+            value = c.annotations.get(col)
+            if value in (None, "NA", ""):
+                continue
+            is_nearest = col.endswith(("_nearest", "_nearest_distance"))
+            if not overlaps and not is_nearest:
+                continue
+            if is_nearest and (not overlaps) and c.annotations.get(
+                f"{label}_nearest"
+            ) in (None, "NA", ""):
+                continue
+            if overlaps and is_nearest:
+                continue        # distance is 0 by definition when overlapping
+            out[col] = str(value).replace('"', "")
+    return out
 
 
 def _consensus_gtf_lines(c: ConsensusRegion) -> List[str]:
@@ -540,11 +582,7 @@ def _consensus_gtf_lines(c: ConsensusRegion) -> List[str]:
         "samples": ",".join(c.samples),
         "member_region_ids": ";".join(c.member_region_ids),
     }
-    # Carry overlapping external-annotation types so the analysis-ready GTF is
-    # self-documenting (only for sources that actually hit this locus).
-    for key, value in c.annotations.items():
-        if key.endswith("_types") and value not in (None, "NA", ""):
-            common[key] = str(value).replace('"', "")
+    common.update(annotation_gtf_attributes(c))
     tx = _gtf_attr(common)
     exon = _gtf_attr({**common, "exon_number": "1"})
     return [
