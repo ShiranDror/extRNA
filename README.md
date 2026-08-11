@@ -513,7 +513,12 @@ consensus_transcript_1-CTCF_binding_site
 consensus_transcript_17                     <- overlaps nothing, bare name kept
 ```
 
-`gene_id` follows (`consensus_transcript_2-enhancer_gene`). Design points:
+`gene_id` is set to the **same string** as `transcript_id` — there is no `_gene`
+suffix. These loci are unannotated transcribed intervals, and a `_gene` suffix
+would assert gene-hood the data does not support. featureCounts groups by
+`gene_id` either way, so the `Geneid` column is exactly the name above.
+
+Design points:
 
 - **Suffix, not prefix**, so the `consensus_transcript_N` stem survives: IDs stay
   grouped by number and anything matching `^consensus_transcript_` keeps working.
@@ -553,7 +558,7 @@ different shapes.
 analysis-ready GTF is self-contained:
 
 ```
-gene_id "consensus_transcript_1-enhancer_gene"; transcript_id "consensus_transcript_1-enhancer";
+gene_id "consensus_transcript_1-enhancer"; transcript_id "consensus_transcript_1-enhancer";
 ... regulatory_n "2"; regulatory_types "CTCF_binding_site:1,enhancer:1";
 regulatory_ids "ENSR1_B33F;ENSR1_538P5"; regulatory_overlap_bp "590";
 regulatory_overlap_frac "0.9578";

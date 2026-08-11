@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 
 import pytest
 
@@ -621,7 +622,10 @@ def test_gene_id_column_matches_the_gtf(tmp_path):
 
     df = consensus_to_dataframe(regions, overlay_labels=["reg"])
     gene_ids = [g for g in df["gene_id"].to_list() if g != "NA"]
-    assert gene_ids == ["consensus_transcript_1-enhancer_gene"]
+    names = [n for n in df["consensus_transcript_name"].to_list() if n != "NA"]
+    # gene_id == transcript name: no '_gene' suffix asserting gene-hood.
+    assert gene_ids == ["consensus_transcript_1-enhancer"]
+    assert gene_ids == names
 
     out = os.path.join(str(tmp_path), "g.gtf")
     write_consensus_gtf(regions, out)
@@ -643,7 +647,10 @@ def test_decorated_name_reaches_gtf_and_table(tmp_path):
     with open(out) as fh:
         text = fh.read()
     assert 'transcript_id "consensus_transcript_1-enhancer"' in text
-    assert 'gene_id "consensus_transcript_1-enhancer_gene"' in text
+    assert 'gene_id "consensus_transcript_1-enhancer"' in text
+    # No gene_id anywhere may carry a '_gene' suffix. Matched precisely: a bare
+    # '_gene' substring check would false-positive on regulatory_genes "PERM1".
+    assert not re.search(r'gene_id "[^"]*_gene"', text)
 
     df = consensus_to_dataframe(regions, overlay_labels=["reg"])
     assert "consensus_transcript_1-enhancer" in df["consensus_transcript_name"].to_list()

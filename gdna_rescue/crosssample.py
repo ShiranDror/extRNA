@@ -500,10 +500,8 @@ def consensus_to_dataframe(
                 "in_consensus_gtf": "yes" if c.in_consensus_gtf else "no",
                 "consensus_transcript_name": c.consensus_transcript_name or "NA",
                 # The exact featureCounts Geneid (default -g gene_id), so the
-                # annotation columns below can be joined onto a count matrix
-                # without reconstructing the '_gene' suffix by hand.
-                "gene_id": (f"{c.consensus_transcript_name}_gene"
-                            if c.consensus_transcript_name else "NA"),
+                # annotation columns below join straight onto a count matrix.
+                "gene_id": c.consensus_transcript_name or "NA",
                 "member_region_ids": ";".join(c.member_region_ids),
                 # Overlay columns last; missing keys are filled below so every
                 # row carries the same schema.
@@ -571,7 +569,10 @@ def _consensus_gtf_lines(c: ConsensusRegion) -> List[str]:
     name = c.consensus_transcript_name
     start1 = c.start + 1
     common = {
-        "gene_id": f"{name}_gene",
+        # gene_id == transcript_id on purpose: these loci are unannotated
+        # transcribed intervals, and a '_gene' suffix would assert gene-hood the
+        # data does not support. featureCounts groups by gene_id either way.
+        "gene_id": name,
         "transcript_id": name,
         "gene_name": name,
         "source": GTF_SOURCE,
