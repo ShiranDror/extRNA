@@ -88,8 +88,11 @@ you can audit per region.
 
 ### Dependencies
 - Python ≥ 3.9
-- numpy, pandas, scipy — install anywhere.
+- numpy, pandas, scipy, polars — install anywhere.
 - **pysam** — required for BAM reading. **pysam has no Windows wheels.**
+- h5py, plotly — only for the coverage store (`--emit-coverage-store`) and the
+  per-transcript plots (`--emit-plots`); both install anywhere, including native
+  Windows, so `merge_candidates.py --emit-plots` stays cross-platform.
 
 ### Recommended: conda (Linux / macOS / WSL)
 ```bash
@@ -149,6 +152,7 @@ samtools index sample.bam
 --threads 4                   # chromosome-level parallelism
 --no-bed                      # skip the BED output
 --emit-bedgraph               # write per-strand candidate bedGraph
+--emit-coverage-store         # write {out-prefix}.coverage.h5 for merge_candidates --emit-plots
 --no-multiqc                  # skip the *.gdna_mqc.tsv MultiQC file
 --sample-name S1              # sample label in the MultiQC row (default: out-prefix basename)
 --verbose
@@ -177,6 +181,7 @@ samtools index sample.bam
 | `sample_analysis.summary.json` | Run parameters, strandedness, class counts |
 | `sample_analysis.candidate_regions.bed` | BED6 of all candidates (optional) |
 | `sample_analysis.candidates.{plus,minus}.bedgraph` | Per-strand depth (with `--emit-bedgraph`) |
+| `sample_analysis.coverage.h5` | Sparse per-base coverage, split by strand and by read category (unique / duplicate / multimapper), for the per-transcript plots (with `--emit-coverage-store`). Needs `h5py`. |
 | `sample_analysis.gdna_mqc.tsv` | **MultiQC** bargraph TSV — read counts per class (annotated / novel / gDNA / …), normalisable to % in MultiQC |
 
 **Coordinate conventions:** TSV and GTF are 1-based inclusive; BED/bedGraph are
@@ -441,6 +446,12 @@ GTF by default.
 --annotate-nearest-window 10000                  # report nearest feature when nothing overlaps
 --annotate-stranded           # require feature strand to match (default: strand-agnostic)
 --no-annotate-names           # keep bare consensus_transcript_N IDs (default: add the type suffix)
+
+# per-transcript IGV-like coverage plots (see below)
+--emit-plots                  # write one HTML per surviving transcript into {out-prefix}_plots/
+--plot-shoulder 1000          # bp of context drawn either side of each locus
+--plot-all-passing            # also plot recurrent gDNA / bidirectional / multimapper loci as controls
+--coverage-store A.h5 B.h5 ...# coverage stores matching --tsv order (default: {sample}.coverage.h5 next to each TSV)
 ```
 
 ### Outputs (`--out-prefix cohort`)
@@ -450,6 +461,7 @@ GTF by default.
 | `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` — **`consensus_transcript_N-<feature_type>` when annotated** (union span; carries `n_samples`, `samples`, `member_region_ids`, `<label>_types`) |
 | `cohort.reference_plus_consensus.gtf` | **(with `--reference-gtf`)** reference + consensus — the analysis-ready GTF for featureCounts on the original STAR BAMs |
 | `cohort.consensus_summary.json` | Parameters and counts per consensus class, **+ the annotation cross-tab** |
+| `cohort_plots/` | **(with `--emit-plots`)** one self-contained IGV-like HTML per surviving transcript + an `index.html`. Each shows every sample's per-base coverage over the locus ± shoulder, split by strand (+ above / − below) and by read category (unique / duplicate / multimapper), with feature and reference-gene tracks and a full evidence panel. Reads the per-sample `*.coverage.h5` stores (needs `h5py` + `plotly`, no pysam). |
 
 Consensus coordinates use the **union span** of the clustered members.
 
@@ -795,6 +807,8 @@ gdna_rescue/
   pipeline.py      # orchestration (chromosome-wise, optional multiprocessing)
   crosssample.py   # cross-sample consensus / reproducibility filter (polars only)
   overlay.py       # external annotation overlay for consensus regions (stdlib only)
+  coverage_store.py# sparse per-base multi-channel coverage store (numpy + h5py, no pysam)
+  plots.py         # per-transcript IGV-like coverage plots (plotly + h5py, no pysam)
   fasta.py         # genome-FASTA reader + novel-transcript sequence extraction
   cli.py           # argument parsing
 tests/

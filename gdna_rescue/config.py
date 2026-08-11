@@ -104,6 +104,9 @@ class Config:
     emit_bed: bool = True                # write candidate_regions.bed
     emit_bedgraph: bool = False          # write per-strand bedGraph of candidates.
     emit_multiqc: bool = True            # write *.gdna_mqc.tsv for MultiQC.
+    emit_coverage_store: bool = False    # write {prefix}.coverage.h5: sparse per-base
+                                         # coverage (unique/dup/multi, per strand) for
+                                         # the per-transcript plots in merge_candidates.
     sample_name: Optional[str] = None    # label used in the MultiQC row (defaults
                                          # to the out-prefix basename).
     verbose: bool = False

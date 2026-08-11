@@ -88,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Write per-strand candidate bedGraph files.")
     misc.add_argument("--no-multiqc", dest="emit_multiqc", action="store_false",
                       help="Do not write the *.gdna_mqc.tsv MultiQC file.")
+    misc.add_argument("--emit-coverage-store", action="store_true",
+                      help="Write {out-prefix}.coverage.h5: sparse per-base "
+                           "coverage split by strand and read category "
+                           "(unique/duplicate/multimapper). Consumed by "
+                           "merge_candidates --emit-plots to draw per-transcript "
+                           "IGV-like coverage plots. Needs h5py.")
     misc.add_argument("--sample-name", default=None,
                       help="Sample label used in the MultiQC row "
                            "(default: out-prefix basename).")
@@ -129,6 +135,7 @@ def args_to_config(args: argparse.Namespace) -> Config:
         emit_bed=args.emit_bed,
         emit_bedgraph=args.emit_bedgraph,
         emit_multiqc=args.emit_multiqc,
+        emit_coverage_store=args.emit_coverage_store,
         sample_name=args.sample_name,
         verbose=args.verbose,
     )

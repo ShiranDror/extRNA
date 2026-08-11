@@ -109,6 +109,14 @@ class ConsensusConfig:
     annotate_stranded: bool = False
     # Append the overlapping feature type to consensus transcript names.
     annotate_names: bool = True
+    # Per-transcript IGV-like coverage plots (needs per-sample *.coverage.h5 from
+    # `detect_gdna_vs_novel.py --emit-coverage-store`, and h5py + plotly).
+    emit_plots: bool = False
+    plot_shoulder: int = 1000            # bp of context drawn either side of a locus
+    plot_all_passing: bool = False       # plot every passing locus, not just novel
+    # Explicit coverage-store paths matching --tsv order; default auto-derived as
+    # {sample}.coverage.h5 next to each TSV.
+    coverage_stores: Optional[List[str]] = None
     verbose: bool = False
 
     def validate(self) -> None:
@@ -131,6 +139,18 @@ class ConsensusConfig:
             raise ValueError("--annotate-labels count must match --annotate count")
         if self.annotate_nearest_window < 0:
             raise ValueError("--annotate-nearest-window must be >= 0")
+        if self.coverage_stores and len(self.coverage_stores) != len(self.tsvs):
+            raise ValueError("--coverage-store count must match --tsv count")
+        if self.emit_plots:
+            if self.plot_shoulder < 0:
+                raise ValueError("--plot-shoulder must be >= 0")
+            for p in resolve_coverage_stores(self):
+                if not os.path.exists(p):
+                    raise FileNotFoundError(
+                        f"coverage store not found: {p!r}. Run "
+                        f"detect_gdna_vs_novel.py with --emit-coverage-store, or "
+                        f"pass --coverage-store explicitly."
+                    )
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +163,25 @@ def _default_sample_name(path: str) -> str:
         if base.endswith(suffix):
             return base[: -len(suffix)]
     return base
+
+
+def _default_coverage_path(tsv_path: str) -> str:
+    """The coverage store `detect --emit-coverage-store` writes next to a TSV.
+
+    detect writes ``{out_prefix}.candidate_regions.tsv`` and
+    ``{out_prefix}.coverage.h5``; strip the TSV suffix and swap in the store one.
+    """
+    for suffix in (".candidate_regions.tsv", ".tsv"):
+        if tsv_path.endswith(suffix):
+            return tsv_path[: -len(suffix)] + ".coverage.h5"
+    return tsv_path + ".coverage.h5"
+
+
+def resolve_coverage_stores(cfg: "ConsensusConfig") -> List[str]:
+    """Coverage-store path per --tsv (explicit list, else auto-derived)."""
+    if cfg.coverage_stores:
+        return list(cfg.coverage_stores)
+    return [_default_coverage_path(p) for p in cfg.tsvs]
 
 
 def _read_header_columns(path: str) -> List[str]:
@@ -293,6 +332,10 @@ class ConsensusRegion:
     # {source_label: {feature_type: count}} for the summary cross-tab.
     annotations: Dict[str, object] = field(default_factory=dict)
     overlay_types: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    # Per-member contributing sample, parallel to member_region_ids (unlike the
+    # deduped `samples` set). Lets the plots pair each sample with the exact
+    # interval it called at this locus.
+    member_samples: List[str] = field(default_factory=list)
 
 
 def _mean_opt(rows: List[dict], key: str) -> Optional[float]:
@@ -352,6 +395,7 @@ def build_consensus(df: pl.DataFrame, cfg: ConsensusConfig) -> List[ConsensusReg
                 samples=samples,
                 member_region_ids=[str(r.get("region_id", "NA")) for r in mrows],
                 member_classes=classes,
+                member_samples=[str(r["sample"]) for r in mrows],
                 majority_class=majority,
                 consensus_class=cons_class,
                 class_agreement=agreement,
@@ -812,5 +856,23 @@ def run(cfg: ConsensusConfig) -> dict:
         summary["n_recurrent_multimapper_artifact"],
         n_gtf,
     )
+    # Per-transcript IGV-like coverage plots (opt-in). Kept last: everything else
+    # is written even if plotting deps are missing or a store is unreadable.
+    if cfg.emit_plots:
+        from . import plots
+        names = cfg.sample_names or [_default_sample_name(p) for p in cfg.tsvs]
+        store_by_sample = dict(zip(names, resolve_coverage_stores(cfg)))
+        if cfg.plot_all_passing:
+            targets = passing
+        else:
+            targets = [c for c in regions
+                       if c.in_consensus_gtf and c.consensus_transcript_name]
+        out_dir = f"{cfg.out_prefix}_plots"
+        n_plots = plots.build_plots(
+            targets, df, indexes, labels, cfg,
+            store_by_sample=store_by_sample, sample_order=names, out_dir=out_dir,
+        )
+        logger.info("Wrote %d per-transcript coverage plot(s) to %s/", n_plots, out_dir)
+
     logger.info("Consensus outputs written with prefix: %s", cfg.out_prefix)
     return summary

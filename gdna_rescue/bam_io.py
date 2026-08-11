@@ -122,8 +122,9 @@ def strand_coverage_for_chrom(
     strandedness: str,
     annotated_mask_plus: "np.ndarray | None" = None,
     annotated_mask_minus: "np.ndarray | None" = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Return (plus_unique, minus_unique, multi, read_stats).
+    collect_store: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict, "dict | None"]:
+    """Return (plus_unique, minus_unique, multi, read_stats, store_channels).
 
     ``plus_unique`` / ``minus_unique`` are strand-specific coverage from
     uniquely-mapped reads (these DEFINE candidate regions). ``multi`` is
@@ -134,6 +135,14 @@ def strand_coverage_for_chrom(
     transcription strand, and multimapped reads. Passing the same positional mask
     as both plus/minus reproduces strand-agnostic counting. Counting by read
     midpoint keeps this O(1) per read within the existing pass.
+
+    When ``collect_store`` is True the same single pass also fills the extra
+    channels needed by the coverage store (for the per-transcript plots), returned
+    as ``store_channels`` (else ``None``): ``dup_plus`` / ``dup_minus`` are the
+    would-be-unique reads that are duplicate-flagged (and so DROPPED from the main
+    tracks, exactly as before), and ``multi_plus`` / ``multi_minus`` split the
+    ``multi`` track by transcription strand. The main tracks are byte-for-byte
+    identical whether or not the store is collected -- discovery is unaffected.
 
     Uses difference-array accumulation over aligned blocks (fast path) or a
     per-base loop when base-quality filtering is requested.
@@ -146,6 +155,13 @@ def strand_coverage_for_chrom(
     plus = np.zeros(size, dtype=np.int32)
     minus = np.zeros(size, dtype=np.int32)
     multi = np.zeros(size, dtype=np.int32)
+
+    dup_plus = dup_minus = multi_plus = multi_minus = None
+    if collect_store:
+        dup_plus = np.zeros(size, dtype=np.int32)
+        dup_minus = np.zeros(size, dtype=np.int32)
+        multi_plus = np.zeros(size, dtype=np.int32)
+        multi_minus = np.zeros(size, dtype=np.int32)
 
     n_unique = 0
     n_unique_annotated = 0
@@ -171,13 +187,37 @@ def strand_coverage_for_chrom(
                 arr[bend] -= 1
 
     for read in bam.fetch(chrom):
-        category = read_category(read, cfg)
-        if category is None:
+        if read.is_unmapped or read.is_qcfail or read.is_supplementary:
             continue
-        if category == "multi":
+        # Base category ignoring the duplicate flag, then apply the duplicate
+        # rule separately so the store can capture dropped duplicates. This
+        # reproduces read_category() exactly for the main tracks.
+        if read.is_secondary:
+            if not cfg.count_secondary:
+                continue
+            base = "multi"
+        elif read.mapping_quality >= cfg.min_mapq:
+            base = "unique"
+        else:
+            base = "multi"
+        dropped_dup = read.is_duplicate and not cfg.keep_duplicates
+
+        if dropped_dup:
+            # Dropped from every main track (matches read_category -> None). Only
+            # would-be-unique duplicates are recorded, as the store's dup channel.
+            if collect_store and base == "unique":
+                strand = transcription_strand(read, strandedness)
+                _add_blocks(dup_plus if strand == "+" else dup_minus, read)
+            continue
+
+        if base == "multi":
             n_multi += 1
             _add_blocks(multi, read)
+            if collect_store:
+                strand = transcription_strand(read, strandedness)
+                _add_blocks(multi_plus if strand == "+" else multi_minus, read)
             continue
+
         # unique read
         n_unique += 1
         strand = transcription_strand(read, strandedness)
@@ -198,14 +238,19 @@ def strand_coverage_for_chrom(
         "n_multi_reads": n_multi,
     }
 
-    if use_baseq:
-        return plus, minus, multi, read_stats
-    return (
-        np.cumsum(plus[:-1]).astype(np.int32),
-        np.cumsum(minus[:-1]).astype(np.int32),
-        np.cumsum(multi[:-1]).astype(np.int32),
-        read_stats,
-    )
+    def _finish(arr):
+        return arr if use_baseq else np.cumsum(arr[:-1]).astype(np.int32)
+
+    store_channels = None
+    if collect_store:
+        store_channels = {
+            "dup_plus": _finish(dup_plus),
+            "dup_minus": _finish(dup_minus),
+            "multi_plus": _finish(multi_plus),
+            "multi_minus": _finish(multi_minus),
+        }
+
+    return _finish(plus), _finish(minus), _finish(multi), read_stats, store_channels
 
 
 def count_unique_reads_in_intervals(

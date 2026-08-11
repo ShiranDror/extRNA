@@ -24,9 +24,10 @@ def _process_one_chrom(
 ):
     """Worker: build strand coverage for one chrom and discover candidates.
 
-    Returns (candidates, total_unique_coverage, total_multi_coverage, read_stats)
-    where the totals are genome-wide mapped-base counts used for the
-    library-level gDNA contamination percentage (summing the arrays is free).
+    Returns (candidates, total_unique_coverage, total_multi_coverage, read_stats,
+    store_payload) where the totals are genome-wide mapped-base counts used for the
+    library-level gDNA contamination percentage (summing the arrays is free) and
+    ``store_payload`` is ``(pos, sparse)`` for the coverage store (or None).
     """
     from .bam_io import strand_coverage_for_chrom  # local import: pysam only here
 
@@ -41,9 +42,10 @@ def _process_one_chrom(
     # Note: reads' annotated-count uses the strand-appropriate mask; total_unique
     # coverage is summed BEFORE build_candidates mutates the arrays (stranded
     # masking zeroes masked positions in place).
-    plus, minus, multi, read_stats = strand_coverage_for_chrom(
+    plus, minus, multi, read_stats, store = strand_coverage_for_chrom(
         bam_path, chrom, length, cfg, strandedness,
         annotated_mask_plus=ann_plus, annotated_mask_minus=ann_minus,
+        collect_store=cfg.emit_coverage_store,
     )
     total_unique = int(plus.sum()) + int(minus.sum())
     total_multi = int(multi.sum())
@@ -52,7 +54,22 @@ def _process_one_chrom(
         annotated_mask=(None if stranded_masking else ann_plus),
         exon_mask=exon_mask, stranded_masking=stranded_masking,
     )
-    return candidates, total_unique, total_multi, read_stats
+
+    store_payload = None
+    if store is not None:
+        from .coverage_store import sparsify
+        # unique_* (plus/minus) are now masked in place when stranded; re-applying
+        # the same mask is a no-op there and removes annotated bases in the
+        # positional case. dup/multi channels are masked here for the first time,
+        # so the store uniformly holds only unannotated coverage.
+        channels = {
+            "unique_plus": plus, "unique_minus": minus,
+            "dup_plus": store["dup_plus"], "dup_minus": store["dup_minus"],
+            "multi_plus": store["multi_plus"], "multi_minus": store["multi_minus"],
+        }
+        store_payload = sparsify(channels, mask_plus=ann_plus, mask_minus=ann_minus)
+
+    return candidates, total_unique, total_multi, read_stats, store_payload
 
 
 def _assign_names(candidates: List[Candidate]) -> None:
@@ -123,6 +140,7 @@ def run(cfg: Config) -> Dict:
     genome_multi_cov = 0
     read_totals = {"n_unique_reads": 0, "n_unique_reads_annotated": 0,
                    "n_multi_reads": 0}
+    coverage_payloads: Dict[str, tuple] = {}  # chrom -> (pos, sparse)
 
     def _accumulate(tu, tm, rs):
         nonlocal genome_unique_cov, genome_multi_cov
@@ -147,19 +165,23 @@ def run(cfg: Config) -> Dict:
                 logger.debug("Finished %s: %d candidates", chrom, len(results[chrom][0]))
         # Reassemble in header order for deterministic numbering.
         for chrom in chroms:
-            cands, tu, tm, rs = results.get(
-                chrom, ([], 0, 0, dict(read_totals)))
+            cands, tu, tm, rs, store_payload = results.get(
+                chrom, ([], 0, 0, dict(read_totals), None))
             candidates.extend(cands)
             _accumulate(tu, tm, rs)
+            if store_payload is not None:
+                coverage_payloads[chrom] = store_payload
     else:
         for chrom in chroms:
-            chrom_cands, tu, tm, rs = _process_one_chrom(
+            chrom_cands, tu, tm, rs, store_payload = _process_one_chrom(
                 cfg.bam, chrom, chrom_sizes[chrom], cfg, strandedness, annotation,
                 stranded_masking,
             )
             logger.debug("Finished %s: %d candidates", chrom, len(chrom_cands))
             candidates.extend(chrom_cands)
             _accumulate(tu, tm, rs)
+            if store_payload is not None:
+                coverage_payloads[chrom] = store_payload
 
     # Sort within-chrom by start (header order already applied across chroms).
     candidates.sort(key=lambda c: (chroms.index(c.chrom), c.start, c.end))
@@ -203,6 +225,18 @@ def run(cfg: Config) -> Dict:
         writers.write_multiqc_tsv(
             cfg, read_assignment, f"{cfg.out_prefix}.gdna_mqc.tsv"
         )
+    if cfg.emit_coverage_store:
+        from .coverage_store import write_coverage_store
+        store_path = f"{cfg.out_prefix}.coverage.h5"
+        sample_name = cfg.sample_name or os.path.basename(cfg.out_prefix)
+        n_chroms = write_coverage_store(
+            store_path, coverage_payloads,
+            sample_name=sample_name, chrom_sizes=chrom_sizes,
+            strandedness=strandedness,
+            mask_mode="stranded" if stranded_masking else "positional",
+        )
+        logger.info("Wrote coverage store %s (%d chromosomes with coverage).",
+                    store_path, n_chroms)
 
     logger.info(
         "Done. %d candidate regions | %d likely_gDNA | %d bidirectional | "

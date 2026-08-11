@@ -12,6 +12,8 @@ dependencies:
   - scipy>=1.9
   - polars>=1.0
   - pysam>=0.21
+  - h5py>=3.7
+  - plotly>=5.15
   - pytest>=7.0
   # Optional helpers referenced in the README (not required by the tool):
   - samtools

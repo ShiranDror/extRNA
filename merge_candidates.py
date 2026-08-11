@@ -91,6 +91,27 @@ def build_parser() -> argparse.ArgumentParser:
                           "orientation, not transcription. Use for sources where "
                           "strand does mean transcription (e.g. CAGE peaks).")
 
+    plots = p.add_argument_group(
+        "per-transcript coverage plots",
+        "Emit one IGV-like HTML per surviving transcript showing every sample's "
+        "per-base coverage (split by strand and by unique/duplicate/multimapper) "
+        "over the locus, with feature and reference-gene tracks and the full "
+        "evidence panel. Needs the per-sample *.coverage.h5 written by "
+        "detect_gdna_vs_novel.py --emit-coverage-store, plus h5py + plotly.",
+    )
+    plots.add_argument("--emit-plots", action="store_true",
+                       help="Write plots into {out-prefix}_plots/.")
+    plots.add_argument("--plot-shoulder", type=int, default=1000,
+                       help="bp of context drawn either side of each locus.")
+    plots.add_argument("--plot-all-passing", action="store_true",
+                       help="Plot every locus passing --min-samples (incl. recurrent "
+                            "gDNA / bidirectional / multimapper) as controls, not "
+                            "just the reproducible novel transcripts.")
+    plots.add_argument("--coverage-store", nargs="+", default=None,
+                       metavar="H5",
+                       help="Coverage-store paths matching --tsv order. Default: "
+                            "auto-derived as {sample}.coverage.h5 next to each TSV.")
+
     p.add_argument("--verbose", action="store_true")
     return p
 
@@ -112,6 +133,10 @@ def main(argv=None) -> int:
         annotate_nearest_window=args.annotate_nearest_window,
         annotate_stranded=args.annotate_stranded,
         annotate_names=args.annotate_names,
+        emit_plots=args.emit_plots,
+        plot_shoulder=args.plot_shoulder,
+        plot_all_passing=args.plot_all_passing,
+        coverage_stores=args.coverage_store,
         verbose=args.verbose,
     )
     logger = get_logger(cfg.verbose)

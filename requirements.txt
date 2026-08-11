@@ -3,6 +3,8 @@ numpy>=1.23
 pandas>=1.5
 scipy>=1.9
 polars>=1.0          # cross-sample consensus (merge_candidates.py)
+h5py>=3.7            # per-sample coverage store (detect --emit-coverage-store)
+plotly>=5.15         # per-transcript IGV-like HTML plots (merge --emit-plots)
 
 # BAM I/O. pysam has NO Windows wheels; install via bioconda on Linux/macOS/WSL:
 #   conda install -c bioconda pysam
