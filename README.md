@@ -264,7 +264,7 @@ are in `summary.json` under `read_assignment_counts` and `gdna_contamination_qc`
 > signal, not total genomic DNA in the library.
 
 Each rescued transcript carries attributes:
-`gene_id "unknown_transcript_N_gene"`, `transcript_id "unknown_transcript_N"`,
+`gene_id "unknown_transcript_N"`, `transcript_id "unknown_transcript_N"`,
 `gene_name "unknown_transcript_N"`, `source "gdna_rescue"`,
 `classification "..."`, `context "..."`, `original_region_id "..."`.
 

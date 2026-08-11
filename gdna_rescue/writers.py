@@ -94,7 +94,9 @@ def _gtf_lines_for_candidate(c: Candidate) -> List[str]:
     end1 = c.end
 
     common = {
-        "gene_id": f"{name}_gene",
+        # gene_id == transcript_id: these are unannotated transcribed intervals,
+        # so a '_gene' suffix would assert gene-hood the data does not support.
+        "gene_id": name,
         "transcript_id": name,
         "gene_name": name,
         "source": GTF_SOURCE,
