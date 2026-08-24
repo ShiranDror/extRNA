@@ -91,7 +91,7 @@ def test_build_plots_smoke(tmp_path):
     idx = parse_overlay(str(gff), label="reg")
 
     cfg = ConsensusConfig(tsvs=["A.candidate_regions.tsv"], out_prefix="cohort",
-                          plot_shoulder=200, verbose=False)
+                          plot_shoulder=200, plot_offline=True, verbose=False)
     out_dir = str(tmp_path / "cohort_plots")
 
     n = plots.build_plots(
@@ -104,7 +104,8 @@ def test_build_plots_smoke(tmp_path):
     html_path = os.path.join(out_dir, "consensus_transcript_1.html")
     assert os.path.exists(html_path)
     assert os.path.exists(os.path.join(out_dir, "index.html"))
-    # plotly.min.js is written alongside (include_plotlyjs="directory").
+    # With plot_offline=True a local plotly.min.js is bundled alongside the pages
+    # (include_plotlyjs="directory").
     assert os.path.exists(os.path.join(out_dir, "plotly.min.js"))
 
     page = open(html_path, encoding="utf-8").read()
@@ -114,3 +115,45 @@ def test_build_plots_smoke(tmp_path):
     # Every sample, including the non-contributing C, has a panel.
     for sample in ("A", "B", "C"):
         assert sample in page
+
+
+def test_build_plots_cdn_default(tmp_path, monkeypatch):
+    """Default (no plot_offline) loads plotly.js from the CDN, writes no local copy."""
+    monkeypatch.chdir(tmp_path)
+
+    length = 4000
+    span = (1000, 1400)
+    store_by_sample = {}
+    for sample in ("A", "B", "C"):
+        p = str(tmp_path / f"{sample}.coverage.h5")
+        if sample == "C":
+            _make_store(p, "1", length, (5, 6), sample)
+        else:
+            _make_store(p, "1", length, span, sample)
+        store_by_sample[sample] = p
+
+    gff = tmp_path / "reg.gff3"
+    gff.write_text(
+        "##gff-version 3\n"
+        "1\tt\tenhancer\t1100\t1300\t.\t.\t.\tID=E1\n",
+        encoding="utf-8",
+    )
+    idx = parse_overlay(str(gff), label="reg")
+
+    cfg = ConsensusConfig(tsvs=["A.candidate_regions.tsv"], out_prefix="cohort",
+                          plot_shoulder=200, verbose=False)
+    out_dir = str(tmp_path / "cohort_plots")
+
+    n = plots.build_plots(
+        [_region()], _df(), [idx], ["reg"], cfg,
+        store_by_sample=store_by_sample, sample_order=["A", "B", "C"],
+        out_dir=out_dir,
+    )
+    assert n == 1
+
+    html_path = os.path.join(out_dir, "consensus_transcript_1.html")
+    assert os.path.exists(html_path)
+    # No local library bundled; the page pulls plotly.js from the CDN instead.
+    assert not os.path.exists(os.path.join(out_dir, "plotly.min.js"))
+    page = open(html_path, encoding="utf-8").read()
+    assert "cdn.plot" in page or "plotly-latest" in page or "plotly.min.js" in page

@@ -417,16 +417,20 @@ def build_plots(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Write plotly.min.js once into out_dir; every page references it relatively
-    # (include_plotlyjs="directory" on to_html only *references* it, so we must
-    # write the file ourselves). Keeps the pages offline and compact.
-    try:
-        from plotly.offline import get_plotlyjs
-        with open(os.path.join(out_dir, "plotly.min.js"), "w", encoding="utf-8") as fh:
-            fh.write(get_plotlyjs())
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Could not write plotly.min.js (%s); pages will still open "
-                       "if the library is cached.", exc)
+    # By default pages load plotly.js from the CDN (small pages, needs network).
+    # With --plot-offline we write plotly.min.js once into out_dir and every page
+    # references it relatively (include_plotlyjs="directory" only *references* it,
+    # so we must write the file ourselves), keeping the pages fully offline.
+    offline = bool(getattr(cfg, "plot_offline", False))
+    plotlyjs_mode = "directory" if offline else "cdn"
+    if offline:
+        try:
+            from plotly.offline import get_plotlyjs
+            with open(os.path.join(out_dir, "plotly.min.js"), "w", encoding="utf-8") as fh:
+                fh.write(get_plotlyjs())
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Could not write plotly.min.js (%s); pages will still open "
+                           "if the library is cached.", exc)
 
     # Open every sample's coverage store once (cached slicing across all loci).
     stores: Dict[str, CoverageStore] = {}
@@ -476,7 +480,7 @@ def build_plots(
                 region, chrom, win_start, win_end, stores, sample_order,
                 member_by_sample, indexes, gene_index,
             )
-            fig_html = fig.to_html(full_html=False, include_plotlyjs="directory",
+            fig_html = fig.to_html(full_html=False, include_plotlyjs=plotlyjs_mode,
                                    default_width="100%")
             evidence_html = _evidence_html(region, labels, member_rows, strandedness)
 

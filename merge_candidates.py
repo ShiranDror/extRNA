@@ -107,6 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Plot every locus passing --min-samples (incl. recurrent "
                             "gDNA / bidirectional / multimapper) as controls, not "
                             "just the reproducible novel transcripts.")
+    plots.add_argument("--plot-offline", action="store_true",
+                       help="Bundle a local plotly.min.js so pages render without "
+                            "network access. Default: load plotly.js from the CDN "
+                            "(smaller pages, but each page needs internet to render).")
     plots.add_argument("--coverage-store", nargs="+", default=None,
                        metavar="H5",
                        help="Coverage-store paths matching --tsv order. Default: "
@@ -136,6 +140,7 @@ def main(argv=None) -> int:
         emit_plots=args.emit_plots,
         plot_shoulder=args.plot_shoulder,
         plot_all_passing=args.plot_all_passing,
+        plot_offline=args.plot_offline,
         coverage_stores=args.coverage_store,
         verbose=args.verbose,
     )

@@ -451,6 +451,7 @@ GTF by default.
 --emit-plots                  # write one HTML per surviving transcript into {out-prefix}_plots/
 --plot-shoulder 1000          # bp of context drawn either side of each locus
 --plot-all-passing            # also plot recurrent gDNA / bidirectional / multimapper loci as controls
+--plot-offline                # bundle a local plotly.min.js so pages render without network (default: load plotly.js from the CDN)
 --coverage-store A.h5 B.h5 ...# coverage stores matching --tsv order (default: {sample}.coverage.h5 next to each TSV)
 ```
 
@@ -461,7 +462,7 @@ GTF by default.
 | `cohort.consensus_transcripts.gtf` | Reproducible novel loci as `consensus_transcript_N` — **`consensus_transcript_N-<feature_type>` when annotated** (union span; carries `n_samples`, `samples`, `member_region_ids`, `<label>_types`) |
 | `cohort.reference_plus_consensus.gtf` | **(with `--reference-gtf`)** reference + consensus — the analysis-ready GTF for featureCounts on the original STAR BAMs |
 | `cohort.consensus_summary.json` | Parameters and counts per consensus class, **+ the annotation cross-tab** |
-| `cohort_plots/` | **(with `--emit-plots`)** one self-contained IGV-like HTML per surviving transcript + an `index.html`. Each shows every sample's per-base coverage over the locus ± shoulder, split by strand (+ above / − below) and by read category (unique / duplicate / multimapper), with feature and reference-gene tracks and a full evidence panel. Reads the per-sample `*.coverage.h5` stores (needs `h5py` + `plotly`, no pysam). |
+| `cohort_plots/` | **(with `--emit-plots`)** one IGV-like HTML per surviving transcript + an `index.html`. Each shows every sample's per-base coverage over the locus ± shoulder, split by strand (+ above / − below) and by read category (unique / duplicate / multimapper), with feature and reference-gene tracks and a full evidence panel. Pages load plotly.js from the CDN by default; pass `--plot-offline` to bundle a local `plotly.min.js` and make them fully self-contained. Reads the per-sample `*.coverage.h5` stores (needs `h5py` + `plotly`, no pysam). |
 
 Consensus coordinates use the **union span** of the clustered members.
 

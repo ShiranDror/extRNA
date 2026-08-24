@@ -114,6 +114,9 @@ class ConsensusConfig:
     emit_plots: bool = False
     plot_shoulder: int = 1000            # bp of context drawn either side of a locus
     plot_all_passing: bool = False       # plot every passing locus, not just novel
+    # By default plots load plotly.js from the CDN (small pages, needs network).
+    # Set True to bundle a local plotly.min.js for fully offline pages.
+    plot_offline: bool = False
     # Explicit coverage-store paths matching --tsv order; default auto-derived as
     # {sample}.coverage.h5 next to each TSV.
     coverage_stores: Optional[List[str]] = None
