@@ -21,6 +21,7 @@ them.
 
 from __future__ import annotations
 
+import gc
 import html
 import os
 from typing import Dict, List, Optional
@@ -452,16 +453,32 @@ def build_plots(
     gene_index = _load_reference_genes(getattr(cfg, "reference_gtf", None), logger)
 
     # Row lookup for per-sample member metrics: (sample, region_id) -> row dict.
+    # Only the members of plotted loci are ever looked up, so restrict the lookup
+    # to those keys and stream the table instead of materializing all ~800k rows.
+    needed = set()
+    for region in targets:
+        for s, rid in zip(region.member_samples, region.member_region_ids):
+            needed.add((str(s), str(rid)))
     row_by_key: Dict[tuple, dict] = {}
-    for r in df.to_dicts():
-        row_by_key[(str(r.get("sample")), str(r.get("region_id")))] = r
+    for r in df.iter_rows(named=True):  # polars streaming, no full to_dicts()
+        key = (str(r.get("sample")), str(r.get("region_id")))
+        if key in needed:
+            row_by_key[key] = r
 
     shoulder = int(getattr(cfg, "plot_shoulder", 1000))
     entries = []
     n_written = 0
+    # targets are sorted by (chrom, start, end, strand), so we only ever need one
+    # chromosome's window data resident at a time: when the chromosome changes,
+    # evict every store's cache to keep RSS bounded to one chrom x N samples.
+    current_chrom = None
     try:
         for region in targets:
             chrom = region.chrom
+            if chrom != current_chrom:
+                for st in stores.values():
+                    st.evict_all()
+                current_chrom = chrom
             win_start = max(0, region.start - shoulder)
             win_end = region.end + shoulder
 
@@ -503,6 +520,15 @@ def build_plots(
             })
             n_written += 1
 
+            # plotly Figures sit in reference cycles; drop each one promptly and
+            # periodically force a collection so they don't pile up faster than the
+            # cyclic GC reclaims them. Log progress so the stage isn't a silent wait.
+            del fig
+            if n_written % 250 == 0:
+                logger.info("Plotted %d/%d transcripts...", n_written, len(targets))
+                gc.collect()
+
+        logger.info("Plotted %d/%d transcripts.", n_written, len(targets))
         _write_index(out_dir, entries)
     finally:
         for store in stores.values():

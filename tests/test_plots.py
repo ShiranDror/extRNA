@@ -117,6 +117,98 @@ def test_build_plots_smoke(tmp_path):
         assert sample in page
 
 
+def _region_on(chrom, start, end, name):
+    return ConsensusRegion(
+        consensus_id=f"{chrom}:{start}-{end}:+",
+        chrom=chrom, start=start, end=end, strand="+",
+        n_samples=2, n_members=2,
+        samples=["A", "B"],
+        member_region_ids=[f"{chrom}:{start}-{end}", f"{chrom}:{start + 10}-{end - 5}"],
+        member_classes=["likely_novel_transcript", "likely_novel_transcript"],
+        majority_class="likely_novel_transcript",
+        consensus_class="reproducible_novel",
+        class_agreement=1.0,
+        mean_unique_fraction=0.98,
+        mean_dual_strand_fraction=0.05,
+        mean_profile_correlation=0.1,
+        mean_avg_depth=25.0,
+        passes_min_samples=True,
+        in_consensus_gtf=True,
+        consensus_transcript_name=name,
+        member_samples=["A", "B"],
+    )
+
+
+def test_build_plots_multichrom_evicts_cache(tmp_path, monkeypatch):
+    """Across chromosomes the coverage cache stays bounded to one chrom at a time.
+
+    Guards the OOM fix: without per-chrom eviction every chromosome's window data
+    would accumulate in each store's cache for the whole loop.
+    """
+    length = 3000
+    # Two samples, each carrying coverage on both chr1 and chr2.
+    store_by_sample = {}
+    for sample, span in (("A", (1000, 1400)), ("B", (1010, 1395))):
+        p = str(tmp_path / f"{sample}.coverage.h5")
+        up = np.zeros(length, dtype=np.int32)
+        up[span[0]:span[1]] = 25
+        pos1, sp1 = sparsify({"unique_plus": up})
+        pos2, sp2 = sparsify({"unique_plus": up})
+        write_coverage_store(
+            p, {"1": (pos1, sp1), "2": (pos2, sp2)}, sample_name=sample,
+            chrom_sizes={"1": length, "2": length}, strandedness="reverse",
+        )
+        store_by_sample[sample] = p
+
+    df = pl.DataFrame({
+        "sample": ["A", "B", "A", "B"],
+        "region_id": ["1:1000-1400", "1:1010-1395", "2:1000-1400", "2:1010-1395"],
+        "class": ["likely_novel_transcript"] * 4,
+        "avg_depth": [25.0, 24.0, 25.0, 24.0],
+        "max_depth": [31, 30, 31, 30],
+        "covered_fraction": [0.99, 0.98, 0.99, 0.98],
+        "unique_fraction": [0.99, 0.97, 0.99, 0.97],
+        "dual_strand_fraction": [0.04, 0.06, 0.04, 0.06],
+        "profile_correlation": [0.1, 0.12, 0.1, 0.12],
+        "dominant_strand": ["+", "+", "+", "+"],
+        "context_label": ["intergenic"] * 4,
+        "nearest_feature_id": ["ENSG1"] * 4,
+        "nearest_feature_distance": [500, 480, 500, 480],
+        "reason_for_classification": ["single strand dominant"] * 4,
+    })
+
+    # Record the max number of chromosomes cached in any store at any window() call.
+    from gdna_rescue.coverage_store import CoverageStore
+    max_cached = {"n": 0}
+    orig_window = CoverageStore.window
+
+    def spy_window(self, chrom, start, end):
+        max_cached["n"] = max(max_cached["n"], len(self._cache))
+        return orig_window(self, chrom, start, end)
+
+    monkeypatch.setattr(CoverageStore, "window", spy_window)
+
+    cfg = ConsensusConfig(tsvs=["A.candidate_regions.tsv"], out_prefix="cohort",
+                          plot_shoulder=200, verbose=False)
+    out_dir = str(tmp_path / "cohort_plots")
+
+    # targets sorted by (chrom, start, ...) as the real pipeline provides them.
+    targets = [
+        _region_on("1", 1000, 1400, "consensus_transcript_1"),
+        _region_on("2", 1000, 1400, "consensus_transcript_2"),
+    ]
+    n = plots.build_plots(
+        targets, df, [], [], cfg,
+        store_by_sample=store_by_sample, sample_order=["A", "B"],
+        out_dir=out_dir,
+    )
+    assert n == 2
+    assert os.path.exists(os.path.join(out_dir, "consensus_transcript_1.html"))
+    assert os.path.exists(os.path.join(out_dir, "consensus_transcript_2.html"))
+    # Eviction keeps at most one chromosome resident per store at a time.
+    assert max_cached["n"] <= 1
+
+
 def test_build_plots_cdn_default(tmp_path, monkeypatch):
     """Default (no plot_offline) loads plotly.js from the CDN, writes no local copy."""
     monkeypatch.chdir(tmp_path)

@@ -156,6 +156,10 @@ class CoverageStore:
         self.mask_mode = str(self._h5.attrs.get("mask_mode", "") or "")
         self._cache: Dict[str, Optional[Tuple[np.ndarray, Dict[str, np.ndarray]]]] = {}
 
+    def evict_all(self) -> None:
+        """Drop all cached chromosome arrays (frees the resident window data)."""
+        self._cache.clear()
+
     def close(self) -> None:
         self._h5.close()
 
