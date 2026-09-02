@@ -139,7 +139,8 @@ def run(cfg: Config) -> Dict:
     genome_unique_cov = 0
     genome_multi_cov = 0
     read_totals = {"n_unique_reads": 0, "n_unique_reads_annotated": 0,
-                   "n_multi_reads": 0}
+                   "n_multi_reads": 0, "n_half_mapped_reads": 0,
+                   "n_discordant_reads": 0}
     coverage_payloads: Dict[str, tuple] = {}  # chrom -> (pos, sparse)
 
     def _accumulate(tu, tm, rs):
@@ -217,9 +218,19 @@ def run(cfg: Config) -> Dict:
         writers.write_bed(candidates, f"{cfg.out_prefix}.candidate_regions.bed")
     if cfg.emit_bedgraph:
         writers.write_bedgraph(candidates, cfg.out_prefix)
+    if cfg.pair_filter != "off":
+        logger.info(
+            "Pair filter (%s): %d half-mapped and %d discordant would-be-unique "
+            "read(s) reclassified into the multimapper/noise channel.",
+            cfg.pair_filter,
+            read_totals["n_half_mapped_reads"],
+            read_totals["n_discordant_reads"],
+        )
+
     summary = writers.write_summary_json(
         cfg, candidates, strand_metrics, summary_json,
         gdna_qc=gdna_qc, read_assignment=read_assignment,
+        read_totals=read_totals,
     )
     if cfg.emit_multiqc and read_assignment is not None:
         writers.write_multiqc_tsv(

@@ -18,4 +18,4 @@ without pysam (which has no Windows wheels):
     cli          - argument parsing / entry point
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

@@ -56,12 +56,40 @@ def transcription_strand(read, strandedness: str) -> str:
     return flip_strand(aligned) if is_first else aligned
 
 
+def _pair_disposition(read, cfg: Config):
+    """Return why a primary read's pair geometry disqualifies it, or None.
+
+    * 'half_mapped' : paired read whose mate is unmapped.
+    * 'discordant'  : paired read not flagged as a proper pair by the aligner
+                      (wrong orientation FF/RR/RF, or genuinely discordant).
+    * None          : pair geometry OK, single-end read, or --pair-filter off.
+
+    Decided from the aligner's PROPER-PAIR FLAG, never an insert-size/TLEN
+    cutoff: splice-aware aligners (STAR/HISAT2) flag intron-spanning pairs as
+    proper even when genomic TLEN is 10-100 kb, so a TLEN cutoff would
+    systematically bias AGAINST long-intron novel transcripts — exactly what
+    this tool exists to find. The flag excludes wrong-orientation and genuinely
+    discordant pairs while keeping spliced ones.
+    """
+    if cfg.pair_filter == "off" or not read.is_paired:
+        return None
+    if read.mate_is_unmapped:
+        return "half_mapped"
+    if not read.is_proper_pair:
+        return "discordant"
+    return None
+
+
 def read_category(read, cfg: Config):
     """Classify a read as 'unique', 'multi', or None (dropped).
 
-    * unique : primary alignment with MAPQ >= min_mapq (STAR unique = 255).
-    * multi  : mapped but a multimapper — primary alignment with MAPQ < min_mapq
-               (STAR 3/1/0), or a secondary alignment (if count_secondary).
+    * unique : primary alignment with MAPQ >= min_mapq (STAR unique = 255) and,
+               for paired reads (unless --pair-filter off), a mapped mate in a
+               proper pair.
+    * multi  : mapped but noise — primary alignment with MAPQ < min_mapq
+               (STAR 3/1/0), a secondary alignment (if count_secondary), or a
+               half-mapped/discordant pair regardless of MAPQ (see
+               _pair_disposition).
     * None   : unmapped / qcfail / duplicate / supplementary / secondary when
                secondary counting is disabled.
     """
@@ -71,7 +99,12 @@ def read_category(read, cfg: Config):
         return None
     if read.is_secondary:
         return "multi" if cfg.count_secondary else None
-    # primary alignment
+    # primary alignment: pair geometry first — half-mapped and discordant pairs
+    # are enriched for adapter chimeras, assembly-gap edges and contaminant
+    # fragments, so they must never DEFINE novel-transcription regions — then
+    # MAPQ.
+    if _pair_disposition(read, cfg) is not None:
+        return "multi"
     if read.mapping_quality >= cfg.min_mapq:
         return "unique"
     return "multi"
@@ -134,7 +167,10 @@ def strand_coverage_for_chrom(
     reads whose midpoint falls in an annotated feature ON THAT READ'S
     transcription strand, and multimapped reads. Passing the same positional mask
     as both plus/minus reproduces strand-agnostic counting. Counting by read
-    midpoint keeps this O(1) per read within the existing pass.
+    midpoint keeps this O(1) per read within the existing pass. It also reports
+    ``n_half_mapped_reads`` / ``n_discordant_reads``: would-otherwise-be-unique
+    primary reads (MAPQ >= min_mapq, not duplicate-dropped) that the pair filter
+    reclassified into the multimapper/noise channel.
 
     When ``collect_store`` is True the same single pass also fills the extra
     channels needed by the coverage store (for the per-transcript plots), returned
@@ -166,6 +202,8 @@ def strand_coverage_for_chrom(
     n_unique = 0
     n_unique_annotated = 0
     n_multi = 0
+    n_half_mapped = 0
+    n_discordant = 0
 
     def _add_blocks(arr, read):
         if use_baseq:
@@ -192,14 +230,17 @@ def strand_coverage_for_chrom(
         # Base category ignoring the duplicate flag, then apply the duplicate
         # rule separately so the store can capture dropped duplicates. This
         # reproduces read_category() exactly for the main tracks.
+        pair_flag = None
         if read.is_secondary:
             if not cfg.count_secondary:
                 continue
             base = "multi"
-        elif read.mapping_quality >= cfg.min_mapq:
-            base = "unique"
         else:
-            base = "multi"
+            pair_flag = _pair_disposition(read, cfg)
+            if pair_flag is None and read.mapping_quality >= cfg.min_mapq:
+                base = "unique"
+            else:
+                base = "multi"
         dropped_dup = read.is_duplicate and not cfg.keep_duplicates
 
         if dropped_dup:
@@ -212,6 +253,13 @@ def strand_coverage_for_chrom(
 
         if base == "multi":
             n_multi += 1
+            if pair_flag is not None and read.mapping_quality >= cfg.min_mapq:
+                # Would-be-unique read demoted by the pair filter; surfaced in
+                # the per-sample summary so users can see the magnitude.
+                if pair_flag == "half_mapped":
+                    n_half_mapped += 1
+                else:
+                    n_discordant += 1
             _add_blocks(multi, read)
             if collect_store:
                 strand = transcription_strand(read, strandedness)
@@ -236,6 +284,8 @@ def strand_coverage_for_chrom(
         "n_unique_reads": n_unique,
         "n_unique_reads_annotated": n_unique_annotated,
         "n_multi_reads": n_multi,
+        "n_half_mapped_reads": n_half_mapped,
+        "n_discordant_reads": n_discordant,
     }
 
     def _finish(arr):

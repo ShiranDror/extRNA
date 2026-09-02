@@ -79,6 +79,70 @@ def test_full_pipeline_classifies_and_rescues(synthetic):
     assert 'transcript_id "unknown_transcript_2"' in text
 
 
+def test_pair_geometry_filter_flags_half_mapped_region(tmp_path):
+    """Region-level integration test for the pair-geometry filter (Config.pair_filter).
+
+    Adds a region (chr_test:4000-4800) with 400 unique single-end reads and 1000
+    paired plus-strand reads whose mate is unmapped. With pair_filter="concordant"
+    (default) the paired reads are reclassified as noise regardless of MAPQ, so
+    unique coverage (400) is swamped by multi coverage (1000) and the region is
+    flagged likely_multimapper_artifact. With pair_filter="off" all 1400 reads
+    count as unique on one dominant strand, so the same region is instead
+    classified likely_novel_transcript.
+    """
+    bam, gtf = write_synthetic_bam_gtf(
+        str(tmp_path / "data"), include_half_mapped=True
+    )
+
+    def _region_row(prefix):
+        with open(prefix + ".candidate_regions.tsv") as fh:
+            header = fh.readline().rstrip("\n").split("\t")
+            for line in fh:
+                row = dict(zip(header, line.rstrip("\n").split("\t")))
+                if row["chrom"] != "chr_test":
+                    continue
+                # TSV start/end are 1-based inclusive; overlap test against
+                # the 0-based half-open region we generated (4000, 4800).
+                if int(row["start"]) - 1 < 4800 and int(row["end"]) > 4000:
+                    return row
+        return None
+
+    # (a) Default config: pair_filter="concordant".
+    prefix_on = str(tmp_path / "out_concordant")
+    cfg_on = Config(
+        bam=bam, gtf=gtf, out_prefix=prefix_on,
+        library_strandedness="forward", threads=1, min_region_length=200,
+    )
+    assert cfg_on.pair_filter == "concordant"
+    summary_on = run(cfg_on)
+
+    row_on = _region_row(prefix_on)
+    assert row_on is not None, "no candidate region found over chr_test:4000-4800"
+    assert row_on["class"] == LIKELY_MULTIMAPPER
+
+    read_totals_on = summary_on["read_totals"]
+    assert read_totals_on["n_half_mapped_reads"] == 1000
+    assert read_totals_on["n_discordant_reads"] == 0
+
+    # (b) Same data, pair_filter="off": paired mate-unmapped reads count as
+    # unique again, so the region is instead a clean novel-transcript call.
+    prefix_off = str(tmp_path / "out_off")
+    cfg_off = Config(
+        bam=bam, gtf=gtf, out_prefix=prefix_off,
+        library_strandedness="forward", threads=1, min_region_length=200,
+        pair_filter="off",
+    )
+    summary_off = run(cfg_off)
+
+    row_off = _region_row(prefix_off)
+    assert row_off is not None, "no candidate region found over chr_test:4000-4800"
+    assert row_off["class"] == LIKELY_NOVEL
+
+    read_totals_off = summary_off["read_totals"]
+    assert read_totals_off["n_half_mapped_reads"] == 0
+    assert read_totals_off["n_discordant_reads"] == 0
+
+
 def test_auto_strandedness_detects_forward(synthetic):
     bam, gtf, prefix = synthetic
     cfg = Config(

@@ -17,6 +17,9 @@ STRANDEDNESS_CHOICES = ("auto", "forward", "reverse", "unstranded")
 # What counts as "annotated" when masking coverage.
 ANNOTATION_MODES = ("exon", "transcript", "gene", "all")
 
+# Pair-geometry filter modes for paired-end reads.
+PAIR_FILTER_CHOICES = ("concordant", "off")
+
 
 @dataclass
 class Config:
@@ -40,6 +43,16 @@ class Config:
     min_baseq: int = 0                   # 0 => fast block-based coverage; >0 uses
                                          # per-base filtering (slower).
     keep_duplicates: bool = False        # by default PCR/optical duplicates dropped.
+    pair_filter: str = "concordant"      # 'concordant': a paired read whose mate is
+                                         # unmapped or whose pair is not flagged
+                                         # proper counts as noise ('multi'), never
+                                         # 'unique', regardless of MAPQ — such pairs
+                                         # are enriched for adapter chimeras,
+                                         # assembly-gap edges and contaminant
+                                         # fragments. Uses the aligner's proper-pair
+                                         # FLAG, never a TLEN cutoff (see
+                                         # bam_io._pair_disposition). Single-end
+                                         # reads unaffected. 'off': old behavior.
 
     # --- Multimapper handling --------------------------------------------
     # Reads with MAPQ >= min_mapq (STAR unique = 255) build the coverage that
@@ -127,6 +140,8 @@ class Config:
             )
         if self.annotation_mode not in ANNOTATION_MODES:
             raise ValueError(f"--annotation-mode must be one of {ANNOTATION_MODES}")
+        if self.pair_filter not in PAIR_FILTER_CHOICES:
+            raise ValueError(f"--pair-filter must be one of {PAIR_FILTER_CHOICES}")
         if self.min_depth < 1:
             raise ValueError("--min-depth must be >= 1")
         if self.strand_min_depth < 1:

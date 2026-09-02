@@ -285,8 +285,16 @@ def write_summary_json(
     path: str,
     gdna_qc: Dict | None = None,
     read_assignment: Dict | None = None,
+    read_totals: Dict | None = None,
 ) -> Dict:
-    """Write the run summary and return it."""
+    """Write the run summary and return it.
+
+    ``read_totals`` are the genome-wide per-category read counts, including the
+    pair-filter reclassification counters (n_half_mapped_reads /
+    n_discordant_reads). They live here in the JSON only — the MultiQC bargraph
+    categories are deliberately kept stable across tool versions so reports
+    merge (see READ_CATEGORY_COLUMNS).
+    """
     n_gdna = sum(1 for c in candidates if c.label == LIKELY_GDNA)
     n_bidir = sum(1 for c in candidates if c.label == POSSIBLE_BIDIRECTIONAL)
     n_novel = sum(1 for c in candidates if c.label == LIKELY_NOVEL)
@@ -307,6 +315,7 @@ def write_summary_json(
         "total_bases_in_rescued_unknown_transcripts": total_rescued_bases,
         "gdna_contamination_qc": gdna_qc or {},
         "read_assignment_counts": read_assignment or {},
+        "read_totals": read_totals or {},
     }
     with open(path, "w") as fh:
         json.dump(summary, fh, indent=2, default=str)

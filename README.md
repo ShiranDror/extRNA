@@ -137,6 +137,10 @@ samtools index sample.bam
 ```
 --min-mapq 20                 # STAR: 255=unique, 3/1/0=multimapper; 20 keeps unique only
 --min-baseq 0                 # >0 enables (slower) per-base quality filtering
+--pair-filter concordant      # half-mapped / non-proper pairs count as noise, never unique
+                              # evidence (uses the proper-pair FLAG, not TLEN, so spliced
+                              # long-intron pairs are kept; gDNA detection unaffected).
+                              # 'off' restores pre-1.1 behavior
 --min-unique-fraction 0.5     # region kept only if >= this fraction of coverage is uniquely mapped
 --no-count-secondary          # don't count secondary alignments in the multimapper track
 --min-depth 10                # combined (both-strand) per-base depth for a base to count as covered
@@ -291,7 +295,14 @@ The decision tree (applied in order):
 0. **Multimapper / repeat artifact → `likely_multimapper_artifact` (dropped).**
    Regions are *discovered* from uniquely-mapped reads (MAPQ ≥ `--min-mapq`;
    STAR unique = 255), but multimapped reads (MAPQ 3/1/0 and secondary
-   alignments) are tracked separately as a noise signal. If the uniquely-mapped
+   alignments) are tracked separately as a noise signal. Half-mapped pairs
+   (mate unmapped) and pairs without the aligner's proper-pair flag also go to
+   the noise channel regardless of MAPQ (`--pair-filter concordant`, the
+   default): such pairs are enriched for adapter chimeras, assembly-gap edges
+   and contaminant fragments, so they must not define novel transcription. The
+   proper-pair *flag* is used — never a TLEN cutoff — so STAR/HISAT2
+   intron-spanning pairs with huge genomic TLEN are kept, and gDNA fragments
+   (ordinary proper pairs) still count toward gDNA classification. If the uniquely-mapped
    fraction of a region's coverage is below `--min-unique-fraction` (default
    0.50), the locus is swamped by multimappers and is almost certainly a repeat
    or alignment artifact — it is dropped regardless of its strand pattern. Local

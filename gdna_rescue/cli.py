@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .config import Config, STRANDEDNESS_CHOICES, ANNOTATION_MODES
+from .config import (
+    Config,
+    STRANDEDNESS_CHOICES,
+    ANNOTATION_MODES,
+    PAIR_FILTER_CHOICES,
+)
 from .utils import get_logger
 
 
@@ -34,6 +39,25 @@ def build_parser() -> argparse.ArgumentParser:
     filt.add_argument("--min-baseq", type=int, default=0)
     filt.add_argument("--keep-duplicates", action="store_true",
                       help="Keep reads flagged as duplicates (default: drop).")
+    filt.add_argument("--pair-filter", choices=PAIR_FILTER_CHOICES,
+                      default="concordant",
+                      help="'concordant': a paired read whose mate is unmapped "
+                           "(half-mapped) or whose pair lacks the proper-pair flag "
+                           "(discordant/wrong orientation) counts as noise "
+                           "('multi'), never as unique evidence, regardless of "
+                           "MAPQ — such pairs are enriched for adapter chimeras, "
+                           "assembly-gap edges and contaminant fragments and must "
+                           "not define novel-transcription regions. This uses the "
+                           "aligner's proper-pair FLAG, never an insert-size/TLEN "
+                           "cutoff: splice-aware aligners (STAR/HISAT2) flag "
+                           "intron-spanning pairs as proper even when genomic "
+                           "TLEN is 10-100 kb, so a TLEN cutoff would "
+                           "systematically bias against long-intron novel "
+                           "transcripts. gDNA detection is UNAFFECTED: gDNA "
+                           "fragments are ordinary proper pairs, so gDNA "
+                           "evidence still flows into region classification. "
+                           "Single-end reads are unaffected. 'off': disable "
+                           "(pre-1.1 behavior).")
     filt.add_argument("--min-unique-fraction", type=float, default=0.50,
                       help="Region kept only if uniquely-mapped reads are >= this "
                            "fraction of total coverage; else flagged as a "
@@ -110,6 +134,7 @@ def args_to_config(args: argparse.Namespace) -> Config:
         min_mapq=args.min_mapq,
         min_baseq=args.min_baseq,
         keep_duplicates=args.keep_duplicates,
+        pair_filter=args.pair_filter,
         count_secondary=args.count_secondary,
         min_unique_fraction=args.min_unique_fraction,
         min_depth=args.min_depth,

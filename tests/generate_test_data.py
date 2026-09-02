@@ -65,8 +65,15 @@ def make_archetype_coverage(
     }
 
 
-def write_synthetic_bam_gtf(out_dir: str) -> Tuple[str, str]:
+def write_synthetic_bam_gtf(
+    out_dir: str, *, include_half_mapped: bool = False
+) -> Tuple[str, str]:
     """Write a small BAM + GTF for full-pipeline testing (requires pysam).
+
+    ``include_half_mapped`` (default False, so existing callers and their exact
+    read-count assertions are untouched) adds an extra unannotated region at
+    ~4000-4800 with unique single-end coverage swamped by paired reads whose
+    mate is unmapped, exercising the pair-geometry filter (Config.pair_filter).
 
     Returns (bam_path, gtf_path). Raises ImportError if pysam is unavailable.
     """
@@ -94,7 +101,10 @@ def write_synthetic_bam_gtf(out_dir: str) -> Tuple[str, str]:
     rng = np.random.default_rng(3)
     read_len = 75
 
-    def add_reads(recs, start, end, strand, n, mapq=255, secondary=False):
+    def add_reads(
+        recs, start, end, strand, n, mapq=255, secondary=False,
+        paired_mate_unmapped=False,
+    ):
         for i in range(n):
             pos = int(rng.integers(start, max(start + 1, end - read_len)))
             a = pysam.AlignedSegment()
@@ -103,12 +113,20 @@ def write_synthetic_bam_gtf(out_dir: str) -> Tuple[str, str]:
             flag = 16 if strand == "-" else 0
             if secondary:
                 flag |= 256
+            if paired_mate_unmapped:
+                # paired(1) | mate_unmapped(8) | first-in-pair(64); NOT
+                # proper-paired. Mate ref/pos point back at this read's own
+                # position, per SAM convention for an unmapped mate.
+                flag |= 1 | 8 | 64
             a.flag = flag
             a.reference_id = 0
             a.reference_start = pos
             a.mapping_quality = mapq  # 255 = STAR unique; low = multimapper
             a.cigar = [(0, read_len)]
             a.query_qualities = pysam.qualitystring_to_array("I" * read_len)
+            if paired_mate_unmapped:
+                a.next_reference_id = a.reference_id
+                a.next_reference_start = a.reference_start
             recs.append(a)
 
     recs = []
@@ -126,6 +144,17 @@ def write_synthetic_bam_gtf(out_dir: str) -> Tuple[str, str]:
     # region, but swamped by multimapped reads (MAPQ 1) -> flagged, not rescued.
     add_reads(recs, 18000, 18800, "+", 400, mapq=255)
     add_reads(recs, 18000, 18800, "+", 1000, mapq=1)
+
+    if include_half_mapped:
+        # Half-mapped-pair artifact, 4000-4800: unique single-end coverage
+        # defines the region, but it's swamped by paired plus-strand reads
+        # whose mate is unmapped. With cfg.pair_filter == "concordant"
+        # (default) these are reclassified as noise regardless of MAPQ, so
+        # unique fraction ~= 400 / (400 + 1000) ~= 0.286 < min_unique_fraction
+        # -> likely_multimapper_artifact. With pair_filter == "off" all 1400
+        # reads count as unique on one dominant strand -> likely_novel_transcript.
+        add_reads(recs, 4000, 4800, "+", 400, mapq=255)
+        add_reads(recs, 4000, 4800, "+", 1000, mapq=255, paired_mate_unmapped=True)
 
     recs.sort(key=lambda r: r.reference_start)
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out:
