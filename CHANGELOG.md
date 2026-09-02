@@ -27,6 +27,26 @@
 
 ### Added
 
+- **External annotation overlay for consensus loci** (`--annotate
+  [LABEL=]FILE ...` on `merge_candidates.py`): one or more GFF3/GFF/GTF sources
+  (e.g. the Ensembl Regulatory Build, optionally gzipped) are overlaid on every
+  reproducible consensus region. Each source contributes eight label-prefixed
+  columns to `consensus_regions.tsv` (`_n`, `_types`, `_ids`, `_overlap_bp`,
+  `_overlap_frac`, `_genes`, `_nearest`, `_nearest_distance`), and real overlaps
+  are also written onto the consensus GTF's `transcript`/`exon` lines as
+  `<label>_*` attributes so the analysis-ready GTF is self-contained.
+  Nearest-feature proximity stays out of the GTF (TSV only) and never changes
+  coordinates, classes, or names. The overlay runs after clustering and the
+  class vote and can only add columns — it never changes a call.
+  - **When `--annotate` is on, overlapping loci are renamed**: the transcript
+    name gains the overlapping feature type as a suffix
+    (`consensus_transcript_2-enhancer`), and `gene_id` stays identical to
+    `transcript_id`, so featureCounts `Geneid`s — and the row labels of any
+    count matrix built from the GTF — differ from an un-annotated run.
+    `--no-annotate-names` keeps bare IDs for comparability. Without
+    `--annotate`, all outputs are unchanged.
+  - Tuning: `--annotate-labels`, `--annotate-feature-types`,
+    `--annotate-nearest-window` (0 disables proximity), `--annotate-stranded`.
 - `summary.json` now carries a `read_totals` block with genome-wide read
   counts, including `n_half_mapped_reads` / `n_discordant_reads` — the
   would-otherwise-be-unique reads the pair filter reclassified — and the
